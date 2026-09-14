@@ -1,5 +1,6 @@
 import { DshAgent, type PermissionMode } from "@ai-employee/dsh-client";
 import type { Config } from "./config.ts";
+import { GATEWAY_TOKEN_ENV, GATEWAY_TOKEN_PLACEHOLDER } from "./dshSettings.ts";
 
 /** Keeps one dsh ACP process per permission mode and restarts it if it dies. */
 export class AgentPool {
@@ -21,6 +22,8 @@ export class AgentPool {
       dshHome: this.config.dshHome,
       mode,
       cwd: this.config.dataDir,
+      // DeepSeek Harness needs a non-empty key variable; the gateway replaces it with the provider's real key.
+      env: { [GATEWAY_TOKEN_ENV]: GATEWAY_TOKEN_PLACEHOLDER },
       launcher: this.config.dshLauncher,
       onLog: (line) => this.log(`[dsh:${mode}] ${line}`),
       onExit: (code) => this.log(`DeepSeek Harness (${mode}) exited with code ${code}`),

@@ -225,3 +225,34 @@ describe("server settings and spending", () => {
     expect(brain.costSince("1999-01-01T00:00:00.000Z")).toBeCloseTo(0.75);
   });
 });
+
+describe("model providers", () => {
+  it("starts with CheaperInference and stores providers, key ciphers and prices", () => {
+    expect(brain.listProviders()).toMatchObject([{ id: "cheaperinference", type: "openai", baseUrl: "https://api.cheaperinference.com/v1", hasKey: false }]);
+    brain.createProvider({ id: "anthropic", name: "Anthropic", type: "anthropic", baseUrl: "https://api.anthropic.com" });
+    brain.setProviderKey("anthropic", "v1:cipher", "abcd");
+    expect(brain.getProvider("anthropic")).toMatchObject({ hasKey: true, keyLast4: "abcd" });
+    expect(brain.providerKeyCipher("anthropic")).toBe("v1:cipher");
+    expect(brain.updateProvider("anthropic", { name: "Anthropic API" }).name).toBe("Anthropic API");
+
+    brain.setModelPrice("anthropic", "claude-sonnet-5", { input: 3, output: 15, cacheRead: null });
+    expect(brain.getModelPrice("anthropic", "claude-sonnet-5")).toMatchObject({ input: 3, output: 15, cacheRead: null });
+    brain.setModelPrice("anthropic", "claude-sonnet-5", null);
+    expect(brain.listModelPrices()).toEqual([]);
+    brain.deleteProvider("anthropic");
+    expect(brain.getProvider("anthropic")).toBeNull();
+  });
+
+  it("turns model ids saved before providers existed into CheaperInference pairs", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      migrate(db, 6);
+      db.exec(`insert into app_settings (key, value) values ('escalationModel', '"deepseek-v4-pro"'), ('visionModel', 'null'), ('dailyBudgetUsd', '2')`);
+      migrate(db);
+      const rows = Object.fromEntries(db.prepare("select key, value from app_settings").all().map((r) => [String(r.key), JSON.parse(String(r.value))]));
+      expect(rows).toEqual({ escalationModel: { provider: "cheaperinference", model: "deepseek-v4-pro" }, visionModel: null, dailyBudgetUsd: 2 });
+    } finally {
+      db.close();
+    }
+  });
+});

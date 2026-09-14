@@ -50,6 +50,7 @@ Everything runs on your own machine or server. The whole "brain" is one SQLite f
 | ✅ **You approve** | The Git agent writes the commit and pull request. The branch is **pushed only after you click approve** in the dashboard. |
 | 🧠 **Memory and handoff notes** | Lessons are saved as project or global memory, and each repository's `.ai/` notes are updated in the same commit. |
 | 🗺️ **Big goals** | "Build an online shop" becomes epics you approve. Each epic runs as small tasks on its own branch and becomes one pull request. |
+| 🔌 **Any model provider** | OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, Groq, Mistral, xAI, Ollama or any OpenAI-compatible API. Add providers and keys on the Models page and pick a provider and model for each agent. |
 | 💸 **Cost control** | Tokens and cost for every agent run, a budget per task, a daily budget for all projects, and one retry with a stronger model when the cheap one gets stuck. |
 | 🚀 **Deploy panel** | Set GitHub Actions secrets from the dashboard and let the team write a matrix build-and-deploy workflow. |
 
@@ -108,9 +109,9 @@ flowchart LR
 
 - **One process, one brain.** The Node server owns `data/brain.db` (SQLite with FTS5 search through Node's built-in `node:sqlite`). Projects, tasks, events, approvals, costs and memory all live there. Back it up by copying one file; the server also makes a nightly copy.
 - **Isolated work.** Every task gets its own Git worktree, so tasks can run side by side and your project checkout is never edited.
-- **Metered models.** Agents call models through the server's local gateway. The gateway adds the API key, records tokens and cost, and refuses calls once a budget is reached.
+- **Metered models.** Agents call models through the server's local gateway. The gateway adds the provider's API key, records tokens and cost, and refuses calls once a budget is reached. Prices come from your own entry, the provider's model list, or a public price list.
 - **Scoped memory.** Agents reach memory through a local MCP endpoint that only exposes global memory plus the current project's memory.
-- **Default models:** `deepseek-v4-flash` for every role, `deepseek-v4-pro` for the stronger retry, and `glm-5.3-flash` for screenshots. Change them on the **Models** page.
+- **Your choice of models.** Set up providers on the **Models** page, then choose a provider and model for each agent, the stronger retry and the screenshot model. The server writes DeepSeek Harness's settings for you. A fresh install starts with CheaperInference: `deepseek-v4-flash` for every agent, `deepseek-v4-pro` for the retry and `glm-5.3-flash` for screenshots.
 
 The full design (components, task lifecycle, security layers and data) is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -120,48 +121,33 @@ The full design (components, task lifecycle, security layers and data) is in [do
 
 - **Node.js** 22.13 or newer (tested on 22 and 24)
 - **git**, and the **GitHub CLI** (`gh`) logged in, for pull requests
-- A **CheaperInference API key** for the models
+- An **API key** from any supported model provider (or a local Ollama)
 
-### 1. Get a CheaperInference API key
-
-All agents call their models through [CheaperInference](https://platform.cheaperinference.com), an OpenAI-compatible API.
-
-1. Create an account at [platform.cheaperinference.com](https://platform.cheaperinference.com).
-2. Add credit and create an API key.
-3. Keep the key private. It only ever goes into `.env.local` on the machine that runs AI Employee.
-
-### 2. Install and configure
+### 1. Install and run
 
 ```bash
 git clone https://github.com/adnanahamed66772ndpc/ai-employee.git
 cd ai-employee
 npm install
 cp .env.example .env.local
-```
-
-Open `.env.local` and paste your key:
-
-```ini
-CHEAPERINFERENCE_API_KEY=your-key-here
-```
-
-`.env.local` is git-ignored. Only the server process reads the key; agents never see it.
-
-### 3. Run it
-
-```bash
-npm run setup:dsh    # writes .dsh-home/settings.yaml so DeepSeek Harness talks to the local gateway
 npm run build        # builds the dashboard
 npm start            # http://127.0.0.1:7717
 ```
 
-Open **http://127.0.0.1:7717** and choose **Add project**. You can pick a folder, clone one of your GitHub repositories, or create a new one.
+`.env.local` is git-ignored and holds optional server settings. You don't need to put an API key there.
 
-To offer more models, list them for DeepSeek Harness and then pick them on the **Models** page:
+### 2. Add a model provider
 
-```bash
-npm run setup:dsh -- --models=deepseek-v4-flash,deepseek-v4-pro --force
-```
+1. Open **http://127.0.0.1:7717** and go to **Models**.
+2. Choose **Add provider** and start from a preset: OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, CheaperInference, Groq, Mistral, xAI, Together AI or Ollama. Any other OpenAI-compatible API works with its base URL.
+3. Paste the provider's API key and choose **Test**. The key is encrypted on the server (AES-256-GCM) and never shown again. Agents never see it: their calls go through the server's gateway, which adds the key.
+4. Under **Agents**, choose a provider and model for each agent, then pick the stronger retry and screenshot models under **Spending**. The model field suggests the provider's own model list.
+
+The encryption secret is created in `data/secret.key` on first start. Keep it with your backups of `data/`, or set `AI_EMPLOYEE_SECRET_KEY` instead; without it, saved keys have to be entered again.
+
+### 3. Add a project
+
+Choose **Add project**. You can pick a folder, clone one of your GitHub repositories, or create a new one.
 
 ## Using it
 
@@ -184,7 +170,8 @@ All settings live in `.env.local`. See [.env.example](.env.example) for every op
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CHEAPERINFERENCE_API_KEY` | none (required) | Model API key, used only by the server's gateway |
+| `AI_EMPLOYEE_SECRET_KEY` | `data/secret.key` | 32-byte secret (base64 or hex) that encrypts provider keys saved on the Models page |
+| `CHEAPERINFERENCE_API_KEY` | none (optional) | Imported once as the CheaperInference provider's encrypted key; manage keys on the Models page afterwards |
 | `AI_EMPLOYEE_PORT` | `7717` | Dashboard and API port (listens on `127.0.0.1` only) |
 | `AI_EMPLOYEE_DATA_DIR` | `./data` | Where `brain.db` and the nightly backups live |
 | `AI_EMPLOYEE_PROJECTS_DIR` | `~/ai-projects` | The only folder projects are added from |
@@ -199,8 +186,8 @@ This setup is tested on Ubuntu 24.04 with nginx and pm2. Run these steps once as
 
 ```bash
 git clone https://github.com/adnanahamed66772ndpc/ai-employee.git ~/ai-employee && cd ~/ai-employee
-npm ci && cp .env.example .env.local        # add CHEAPERINFERENCE_API_KEY
-npm run setup:dsh
+npm ci && cp .env.example .env.local
+npm run setup:dsh                            # first DeepSeek Harness settings; the server keeps them up to date
 sudo bash scripts/vps/setup-agent-user.sh    # unprivileged "aiagent" user and /srv/ai-projects
 npm run set-password                         # dashboard login
 ```
@@ -218,7 +205,7 @@ The header of [`deploy/nginx/ai-employee.conf`](deploy/nginx/ai-employee.conf) h
 
 - **Updating:** `git pull`, `npm ci` if dependencies changed, `npm run build`, then `pm2 restart ai-employee`. Restart only while no task is running.
 - **Telegram:** create a bot with @BotFather and put its token in `.env.local`. Send the bot a message, run `npm run telegram:chat-id`, add the chat id it prints, and restart the server. Test it from the **Models** page.
-- **After `npm run setup:dsh`:** run `sudo bash scripts/vps/setup-agent-user.sh` again.
+- **Models:** add providers and keys on the Models page. The agent user's DeepSeek Harness settings link to a copy the server keeps up to date, so model changes need no restart.
 
 ## Security
 

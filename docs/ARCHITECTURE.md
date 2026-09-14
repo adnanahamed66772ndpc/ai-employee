@@ -15,7 +15,7 @@ apps/server  (Node 22.13+, Hono, one process, listens on 127.0.0.1 only)
   ├─ Brain            packages/brain → SQLite file data/brain.db (node:sqlite, WAL, FTS5)
   ├─ REST API + SSE   /api/*   (login required when a password is set)
   ├─ Brain MCP        /mcp     Streamable HTTP, a bearer token per agent session, direct local requests only
-  ├─ Model gateway    /llm/v1  chat completions → CheaperInference with the server's key; meters usage; direct local only
+  ├─ Model gateway    /llm/p/<provider>/…  forwards to the provider with its decrypted key; meters usage; direct local only
   ├─ Orchestrator     apps/server/src/pipeline.ts (up to AI_EMPLOYEE_MAX_TASKS tasks at once, one worktree each)
   ├─ Agent pool       long-lived `dsh --profile acp` processes: read-only and workspace-write
   ├─ Notifications    apps/server/src/notify.ts (Telegram)
@@ -34,7 +34,15 @@ apps/server  (Node 22.13+, Hono, one process, listens on 127.0.0.1 only)
 
 ## Agents and models
 
-All agents are [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`@deepseek-ai/dsh`, pinned) sessions over ACP. Its `cheaperinference` provider points at the server's gateway (`http://127.0.0.1:7717/llm/v1`), which forwards to CheaperInference. Models are set per role on the dashboard's **Models** page; the default for every role is `deepseek-v4-flash`.
+All agents are [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`@deepseek-ai/dsh`, pinned) sessions over ACP.
+
+**Providers (`providers.ts`, `keystore.ts`, `dshSettings.ts`, `llm.ts`):**
+- **Types:** OpenAI-compatible (any base URL, including Ollama), Anthropic Messages, or Gemini's OpenAI endpoint. They are added on the **Models** page.
+- **Keys:** encrypted with AES-256-GCM using a 32-byte secret (`AI_EMPLOYEE_SECRET_KEY` or `data/secret.key`). They are decrypted only for the gateway, model lists and screenshot reviews, and never returned to the browser.
+- **Models:** each role, the stronger retry and the screenshot model is a provider and model pair.
+- **DeepSeek Harness settings:** the server writes `settings.yaml` from the providers and models in use. Every provider points at the gateway (`http://127.0.0.1:7717/llm/p/<id>/v1`, or `…/llm/p/<id>` for Anthropic) with a placeholder key. On a server the agent user's settings link to a shared copy, so changes apply without a restart.
+- **Gateway:** adds the real key (Bearer, or `x-api-key` for Anthropic), retries outages, meters OpenAI and Anthropic usage, and refuses calls once a budget is spent.
+- **Prices:** an owner-entered price, else the provider's model list (CheaperInference, OpenRouter), else a daily public price list.
 
 | Role | Mode | Job |
 |---|---|---|
@@ -110,6 +118,7 @@ Events are stored in `events` and pushed to the dashboard over SSE (`/api/stream
 |---|---|
 | `data/brain.db` | The SQLite brain (git-ignored). Nightly copies go to `data/backups`. |
 | `data/auth.json` | Dashboard password hash and session secret (mode 600, git-ignored) |
+| `data/secret.key` | Secret that encrypts provider API keys (mode 600, git-ignored); brain backups do not contain it |
 | `.dsh-home/` | DeepSeek Harness settings and sessions for the server user (git-ignored) |
 | `<projects>/` | Managed project repositories (`/srv/ai-projects` with an agent user, else `~/ai-projects`) |
 | `<projects>/.worktrees/` | One worktree per active, stuck or failed task |
@@ -120,7 +129,8 @@ Memory scopes are `global` (every project) and `project` (one repository). Searc
 
 | Variable | Meaning |
 |---|---|
-| `CHEAPERINFERENCE_API_KEY` | Model gateway key (required, server only) |
+| `AI_EMPLOYEE_SECRET_KEY` | Secret that encrypts provider keys (default: `data/secret.key`) |
+| `CHEAPERINFERENCE_API_KEY` | Optional; imported once as the CheaperInference provider's key |
 | `AI_EMPLOYEE_PORT` | Server port, default 7717 |
 | `AI_EMPLOYEE_DATA_DIR` | Brain directory, default `./data` |
 | `AI_EMPLOYEE_AGENT_USER` | Run agents and checks as this user |

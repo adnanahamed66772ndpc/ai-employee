@@ -184,6 +184,32 @@ export interface RoleSetting {
   reasoningEffort: string | null;
 }
 
+/** How the server talks to a provider: any OpenAI-compatible API, Anthropic's Messages API, or Gemini's OpenAI endpoint. */
+export type ProviderType = "openai" | "anthropic" | "gemini";
+
+/** A model provider set up on the Models page. The key itself never leaves the server. */
+export interface Provider {
+  id: string;
+  name: string;
+  type: ProviderType;
+  baseUrl: string;
+  hasKey: boolean;
+  /** The key's last four characters, to tell keys apart; null without a key or for very short keys. */
+  keyLast4: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A price the owner entered for a model, in US dollars per million tokens. */
+export interface ModelPrice {
+  providerId: string;
+  model: string;
+  input: number;
+  output: number;
+  cacheRead: number | null;
+  updatedAt: string;
+}
+
 /** How one critic has done in a project, so critics that do not pay for themselves can be switched off. */
 export interface CriticStats {
   critic: string;

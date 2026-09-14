@@ -5,25 +5,43 @@ import type { Brain } from "@ai-employee/brain";
  * stronger model the Coder gets one more try with when the cheap model's rounds did not get a change accepted.
  */
 
+/** A model at a provider set up on the Models page. */
+export interface ModelRef {
+  provider: string;
+  model: string;
+}
+
 export const DEFAULT_DAILY_BUDGET_USD = 2;
-export const DEFAULT_ESCALATION_MODEL = "deepseek-v4-pro";
+export const DEFAULT_ESCALATION_MODEL: ModelRef = { provider: "cheaperinference", model: "deepseek-v4-pro" };
 /** Looks at the running app's screenshots for the UI critic; it must understand images. */
-export const DEFAULT_VISION_MODEL = "glm-5.3-flash";
+export const DEFAULT_VISION_MODEL: ModelRef = { provider: "cheaperinference", model: "glm-5.3-flash" };
 
 export interface SpendingSettings {
   /** null: no daily limit. */
   dailyBudgetUsd: number | null;
   /** null: no second try. */
-  escalationModel: string | null;
+  escalationModel: ModelRef | null;
   /** null: screenshots are not reviewed (the free page checks still run). */
-  visionModel: string | null;
+  visionModel: ModelRef | null;
 }
+
+/** A saved model choice. Settings from before providers existed hold only a CheaperInference model id. */
+export function toModelRef(value: unknown): ModelRef | null {
+  if (typeof value === "string") return value.trim() ? { provider: "cheaperinference", model: value.trim() } : null;
+  if (value && typeof value === "object") {
+    const { provider, model } = value as Record<string, unknown>;
+    if (typeof provider === "string" && typeof model === "string" && provider && model) return { provider, model };
+  }
+  return null;
+}
+
+export const sameModel = (a: ModelRef | null, b: ModelRef | null) => Boolean(a && b && a.provider === b.provider && a.model === b.model);
 
 export function spendingSettings(brain: Brain): SpendingSettings {
   return {
     dailyBudgetUsd: brain.getAppSetting<number | null>("dailyBudgetUsd", DEFAULT_DAILY_BUDGET_USD),
-    escalationModel: brain.getAppSetting<string | null>("escalationModel", DEFAULT_ESCALATION_MODEL),
-    visionModel: brain.getAppSetting<string | null>("visionModel", DEFAULT_VISION_MODEL),
+    escalationModel: toModelRef(brain.getAppSetting<unknown>("escalationModel", DEFAULT_ESCALATION_MODEL)),
+    visionModel: toModelRef(brain.getAppSetting<unknown>("visionModel", DEFAULT_VISION_MODEL)),
   };
 }
 

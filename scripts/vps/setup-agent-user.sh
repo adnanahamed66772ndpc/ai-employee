@@ -40,15 +40,19 @@ sudo -u "$AGENT_USER" -H bash -c "
   git config --global --replace-all safe.directory '*'
 "
 
-[ -f "$REPO_DIR/.dsh-home/settings.yaml" ] || { echo "run 'npm run setup:dsh' first" >&2; exit 1; }
-grep -q "baseURL: http://127.0.0.1:" "$REPO_DIR/.dsh-home/settings.yaml" || {
-  echo ".dsh-home/settings.yaml still calls CheaperInference directly; run 'npm run setup:dsh -- --force' first" >&2
-  exit 1
-}
-install -o "$AGENT_USER" -g "$AGENT_USER" -m 600 "$REPO_DIR/.dsh-home/settings.yaml" "$AGENT_HOME/.dsh-home/settings.yaml"
-# dsh needs a non-empty key variable; the gateway replaces it with the real key.
+# The server writes DeepSeek Harness settings (providers and models from the Models page, no keys) to a shared file.
+# The agent user's settings.yaml links to it, so model changes apply without running this script again.
+SHARED_SETTINGS="$PROJECTS_DIR/.tools/dsh/settings.yaml"
+install -d -o "$SERVER_USER" -g "$GROUP" -m 755 "$PROJECTS_DIR/.tools" "$PROJECTS_DIR/.tools/dsh"
+if [ ! -f "$SHARED_SETTINGS" ]; then
+  [ -f "$REPO_DIR/.dsh-home/settings.yaml" ] || { echo "start the AI Employee server once (or run 'npm run setup:dsh') first" >&2; exit 1; }
+  install -o "$SERVER_USER" -g "$GROUP" -m 644 "$REPO_DIR/.dsh-home/settings.yaml" "$SHARED_SETTINGS"
+fi
+ln -sfn "$SHARED_SETTINGS" "$AGENT_HOME/.dsh-home/settings.yaml"
+chown -h "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.dsh-home/settings.yaml"
+# dsh needs a non-empty key variable; the gateway replaces it with the provider's real key.
 install -o "$AGENT_USER" -g "$AGENT_USER" -m 600 /dev/null "$AGENT_HOME/.ai-employee.env"
-printf 'CHEAPERINFERENCE_API_KEY=%s\n' "supplied-by-ai-employee-gateway" > "$AGENT_HOME/.ai-employee.env"
+printf 'AI_EMPLOYEE_GATEWAY_TOKEN=%s\nCHEAPERINFERENCE_API_KEY=%s\n' "supplied-by-ai-employee-gateway" "supplied-by-ai-employee-gateway" > "$AGENT_HOME/.ai-employee.env"
 
 cat > /usr/local/bin/ai-agent-dsh <<'LAUNCHER'
 #!/usr/bin/env bash

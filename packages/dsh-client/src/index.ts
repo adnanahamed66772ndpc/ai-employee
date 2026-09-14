@@ -205,7 +205,7 @@ export class DshAgent {
     const pick = choices.find(isExact) ?? matches.find((c) => haystack(c).includes(provider.toLowerCase())) ?? matches[0];
     if (!pick) {
       throw new Error(
-        `Model "${provider}/${model}" is not configured in dsh. Available: ${choices.map((c) => c.value).join(", ") || "none"}. Run npm run setup:dsh.`,
+        `Model "${provider}/${model}" is not configured in DeepSeek Harness. Available: ${choices.map((c) => c.value).join(", ") || "none"}. Choose it on the Models page (the server writes the settings), and on a server run scripts/vps/setup-agent-user.sh once.`,
       );
     }
     let response = await this.untilExit(

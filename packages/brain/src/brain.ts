@@ -19,7 +19,10 @@ import {
   type TaskKind,
   type Memory,
   type MemoryKind,
+  type ModelPrice,
   type Project,
+  type Provider,
+  type ProviderType,
   type Role,
   type RoleSetting,
   type RunStatus,
@@ -838,6 +841,85 @@ export class Brain extends EventEmitter<{ change: [BrainChange] }> {
     return this.getRoleSetting(role);
   }
 
+  // ---- model providers and prices -----------------------------------------------
+
+  listProviders(): Provider[] {
+    return this.all("select * from providers order by name collate nocase").map(toProvider);
+  }
+
+  getProvider(id: string): Provider | null {
+    const row = this.one("select * from providers where id = ?", id);
+    return row ? toProvider(row) : null;
+  }
+
+  /** The encrypted key; only the server's provider registry decrypts it. */
+  providerKeyCipher(id: string): string | null {
+    const row = this.one("select key_cipher from providers where id = ?", id);
+    return row?.key_cipher ? String(row.key_cipher) : null;
+  }
+
+  createProvider(input: { id: string; name: string; type: ProviderType; baseUrl: string }): Provider {
+    this.run("insert into providers (id, name, type, base_url) values (?, ?, ?, ?)", input.id, input.name, input.type, input.baseUrl);
+    this.emit("change", { kind: "settings", key: "providers" });
+    return this.getProvider(input.id)!;
+  }
+
+  updateProvider(id: string, patch: Partial<{ name: string; type: ProviderType; baseUrl: string }>): Provider {
+    const columns: [string, SQLInputValue][] = [];
+    if (patch.name !== undefined) columns.push(["name", patch.name]);
+    if (patch.type !== undefined) columns.push(["type", patch.type]);
+    if (patch.baseUrl !== undefined) columns.push(["base_url", patch.baseUrl]);
+    if (columns.length) {
+      this.run(
+        `update providers set ${columns.map(([c]) => `${c} = ?`).join(", ")}, updated_at = ? where id = ?`,
+        ...columns.map(([, v]) => v),
+        now(),
+        id,
+      );
+      this.emit("change", { kind: "settings", key: "providers" });
+    }
+    return this.getProvider(id)!;
+  }
+
+  setProviderKey(id: string, cipher: string | null, last4: string | null): void {
+    this.run("update providers set key_cipher = ?, key_last4 = ?, updated_at = ? where id = ?", cipher, last4, now(), id);
+    this.emit("change", { kind: "settings", key: "providers" });
+  }
+
+  deleteProvider(id: string): void {
+    this.run("delete from providers where id = ?", id);
+    this.emit("change", { kind: "settings", key: "providers" });
+  }
+
+  listModelPrices(): ModelPrice[] {
+    return this.all("select * from model_prices order by provider_id, model").map(toModelPrice);
+  }
+
+  getModelPrice(providerId: string, model: string): ModelPrice | null {
+    const row = this.one("select * from model_prices where provider_id = ? and model = ?", providerId, model);
+    return row ? toModelPrice(row) : null;
+  }
+
+  /** Saves the owner's price for a model (US dollars per million tokens), or removes it with null. */
+  setModelPrice(providerId: string, model: string, price: { input: number; output: number; cacheRead: number | null } | null): void {
+    if (price) {
+      this.run(
+        `insert into model_prices (provider_id, model, input_per_million, output_per_million, cache_read_per_million, updated_at) values (?, ?, ?, ?, ?, ?)
+         on conflict(provider_id, model) do update set input_per_million = excluded.input_per_million, output_per_million = excluded.output_per_million,
+           cache_read_per_million = excluded.cache_read_per_million, updated_at = excluded.updated_at`,
+        providerId,
+        model,
+        price.input,
+        price.output,
+        price.cacheRead,
+        now(),
+      );
+    } else {
+      this.run("delete from model_prices where provider_id = ? and model = ?", providerId, model);
+    }
+    this.emit("change", { kind: "settings", key: "prices" });
+  }
+
   // ---- server settings and spending -------------------------------------------
 
   /** A server-wide setting stored as JSON, or `fallback` when it was never set (a saved null stays null). */
@@ -861,3 +943,23 @@ export class Brain extends EventEmitter<{ change: [BrainChange] }> {
     return Number(this.one("select coalesce(sum(cost_usd), 0) as cost from agent_runs where started_at >= ?", sinceIso)!.cost);
   }
 }
+
+const toProvider = (r: Row): Provider => ({
+  id: String(r.id),
+  name: String(r.name),
+  type: String(r.type) as ProviderType,
+  baseUrl: String(r.base_url),
+  hasKey: r.key_cipher !== null && r.key_cipher !== undefined && String(r.key_cipher) !== "",
+  keyLast4: r.key_last4 ? String(r.key_last4) : null,
+  createdAt: String(r.created_at),
+  updatedAt: String(r.updated_at),
+});
+
+const toModelPrice = (r: Row): ModelPrice => ({
+  providerId: String(r.provider_id),
+  model: String(r.model),
+  input: Number(r.input_per_million),
+  output: Number(r.output_per_million),
+  cacheRead: r.cache_read_per_million === null || r.cache_read_per_million === undefined ? null : Number(r.cache_read_per_million),
+  updatedAt: String(r.updated_at),
+});
