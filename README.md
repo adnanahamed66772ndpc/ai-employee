@@ -87,6 +87,16 @@ Everything runs on your own machine or server. The whole "brain" is one SQLite f
       <p align="center"><b>Project</b><br><sub>Checks, app check, budget and what each critic has found.</sub></p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/models.png" alt="Models page with three providers, their saved keys, and a provider and model for each agent">
+      <p align="center"><b>Models</b><br><sub>Your providers, and a provider and model for each agent.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/add-provider.png" alt="Adding Google Gemini from a preset with its API key">
+      <p align="center"><b>Add a provider</b><br><sub>Pick a preset and paste the key. It is encrypted and never shown again.</sub></p>
+    </td>
+  </tr>
 </table>
 
 ## How it works
