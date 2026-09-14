@@ -207,16 +207,24 @@ export async function lookupPackages(
   options: { concurrency?: number; timeoutMs?: number } = {},
 ): Promise<{ infos: Map<string, PackageInfo>; failed: string[] }> {
   const { concurrency = 6, timeoutMs = LOOKUP_TIMEOUT_MS } = options;
-  const deadline = Date.now() + timeoutMs;
   const infos = new Map<string, PackageInfo>();
   const failed: string[] = [];
   const queue = [...new Set(names)];
+  // One shared timer rather than clock checks: a timer can fire a millisecond before Date.now() reaches the deadline.
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      reject(new Error("the package lookups ran out of time"));
+    }, timeoutMs);
+  });
+  deadline.catch(() => {});
   const worker = async () => {
     for (let name = queue.shift(); name !== undefined; name = queue.shift()) {
-      const left = deadline - Date.now();
       try {
-        if (left <= 0) throw new Error("out of time");
-        const info = await withTimeout(lookup.info(name), left, `looking up ${name}`);
+        if (expired) throw new Error("out of time");
+        const info = await Promise.race([lookup.info(name), deadline]);
         if (info) infos.set(name, info);
         else failed.push(name);
       } catch {
@@ -225,6 +233,7 @@ export async function lookupPackages(
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
+  clearTimeout(timer);
   return { infos, failed };
 }
 
