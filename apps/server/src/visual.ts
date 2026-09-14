@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import type { Project, Usage } from "@ai-employee/brain";
 import { runCapture, runShellCommand } from "./checks.ts";
 import type { CriticFinding } from "./critics.ts";
-import { usageCost, type PriceBook } from "./llm.ts";
+import { fromAnthropicUsage, usageCost, type AnthropicUsage, type PriceBook } from "./llm.ts";
+import { isLocalProvider, type GatewayProvider } from "./providers.ts";
+import type { ModelRef } from "./spending.ts";
 
 /*
  * The visual check for UI changes: start the task's app, open it on a phone and a desktop screen, and let a vision model
@@ -113,25 +115,55 @@ export interface VisionReply {
   model: string;
 }
 
-export type VisionReviewer = (model: string, prompt: string, shots: Screenshot[], signal: AbortSignal) => Promise<VisionReply>;
+export type VisionReviewer = (model: ModelRef, prompt: string, shots: Screenshot[], signal: AbortSignal) => Promise<VisionReply>;
 
-/** Sends the screenshots to a vision model through CheaperInference with the server's key, and prices the call. */
-export function gatewayVision(baseUrl: string, apiKey: string | undefined, prices: PriceBook): VisionReviewer {
-  return async (model, prompt, shots, signal) => {
-    if (!apiKey) throw new Error("CHEAPERINFERENCE_API_KEY is not set, so screenshots cannot be reviewed");
+/**
+ * Sends the screenshots to a vision model at its provider with the provider's key, and prices the call. Anthropic
+ * takes image blocks on the Messages API; OpenAI-compatible and Gemini providers take image URLs on chat completions.
+ */
+export function gatewayVision(providers: { gateway(id: string): GatewayProvider | null }, prices: Pick<PriceBook, "get">, fetchImpl: typeof fetch = fetch): VisionReviewer {
+  return async (ref, prompt, shots, signal) => {
+    const provider = providers.gateway(ref.provider);
+    if (!provider) throw new Error(`The screenshot model's provider "${ref.provider}" is not set up`);
+    if (!provider.apiKey && !isLocalProvider(provider.baseUrl)) throw new Error(`No API key is set for ${provider.name}, so screenshots cannot be reviewed`);
+    const timeout = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
+    const label = `${provider.id}/${ref.model}`;
+
+    if (provider.type === "anthropic") {
+      const res = await fetchImpl(`${provider.baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", ...(provider.apiKey ? { "x-api-key": provider.apiKey } : {}) },
+        body: JSON.stringify({
+          model: ref.model,
+          max_tokens: 2_000,
+          messages: [
+            {
+              role: "user",
+              content: [...shots.map((shot) => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: shot.jpegBase64 } })), { type: "text", text: prompt }],
+            },
+          ],
+        }),
+        signal: timeout,
+      });
+      if (!res.ok) throw new Error(`The vision model ${label} answered HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      const body = (await res.json()) as { content?: { type?: string; text?: string }[]; usage?: AnthropicUsage };
+      const text = (body.content ?? []).filter((block) => block.type === "text").map((block) => block.text ?? "").join("");
+      return { text, usage: usageCost(fromAnthropicUsage(body.usage ?? {}), await prices.get(provider.id, ref.model)), model: label };
+    }
+
     const content = [
       { type: "text", text: prompt },
       ...shots.map((shot) => ({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${shot.jpegBase64}` } })),
     ];
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const res = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({ model, messages: [{ role: "user", content }], max_tokens: 2_000 }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+      headers: { "content-type": "application/json", ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) },
+      body: JSON.stringify({ model: ref.model, messages: [{ role: "user", content }], max_tokens: 2_000 }),
+      signal: timeout,
     });
-    if (!res.ok) throw new Error(`The vision model ${model} answered HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) throw new Error(`The vision model ${label} answered HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const body = (await res.json()) as { choices?: { message?: { content?: string } }[]; usage?: Parameters<typeof usageCost>[0] };
-    return { text: body.choices?.[0]?.message?.content ?? "", usage: usageCost(body.usage ?? {}, await prices.get(model)), model };
+    return { text: body.choices?.[0]?.message?.content ?? "", usage: usageCost(body.usage ?? {}, await prices.get(provider.id, ref.model)), model: label };
   };
 }
 

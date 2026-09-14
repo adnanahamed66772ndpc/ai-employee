@@ -10,6 +10,8 @@ import type {
   Memory,
   MemoryKind,
   Project,
+  Provider,
+  ProviderType,
   Role,
   RoleSetting,
   Scope,
@@ -18,10 +20,50 @@ import type {
   Usage,
 } from "@ai-employee/brain/types";
 
-export type { AgentRun, Approval, BrainChange, BrainEvent, CriticKind, CriticStats, Epic, Goal, Memory, MemoryKind, Project, Role, RoleSetting, Scope, Session, Task, Usage };
+export type { AgentRun, Approval, BrainChange, BrainEvent, CriticKind, CriticStats, Epic, Goal, Memory, MemoryKind, Project, Provider, ProviderType, Role, RoleSetting, Scope, Session, Task, Usage };
+
+/** A model at a provider set up on the Models page. */
+export interface ModelRef {
+  provider: string;
+  model: string;
+}
+
+export interface ProviderPreset {
+  id: string;
+  name: string;
+  type: ProviderType;
+  baseUrl: string;
+}
+
+/** US dollars per million tokens. */
+export interface Pricing {
+  input: number;
+  cacheRead: number;
+  output: number;
+}
+
+export interface CatalogModel {
+  id: string;
+  price: Pricing | null;
+}
+
+export interface PriceRow extends ModelRef {
+  providerName: string;
+  price: Pricing | null;
+  source: "manual" | "provider" | "public" | null;
+}
+
+export interface ProviderInput {
+  name: string;
+  type: ProviderType;
+  baseUrl: string;
+  /** Leave out to keep the saved key; null removes it. */
+  apiKey?: string | null;
+}
 
 export interface Health {
-  cheaperInferenceKey: boolean;
+  /** Providers the team uses that have no API key yet. */
+  missingKeys: string[];
   dshSettings: boolean;
   agents: Record<"read-only" | "workspace-write", boolean>;
   currentTaskId: string | null;
@@ -48,8 +90,8 @@ export interface GoalDetail {
 
 export interface Spending {
   dailyBudgetUsd: number | null;
-  escalationModel: string | null;
-  visionModel: string | null;
+  escalationModel: ModelRef | null;
+  visionModel: ModelRef | null;
   spentTodayUsd: number;
   resetsAt: string;
 }
@@ -192,10 +234,19 @@ export const api = {
   roles: () => request<RoleSetting[]>("GET", "/settings/roles"),
   setRole: (role: Role, input: { provider: string; model: string; reasoningEffort: string | null }) =>
     request<RoleSetting>("PUT", `/settings/roles/${role}`, input),
-  models: () => request<{ models: string[]; error?: string }>("GET", "/models"),
+  providers: () => request<{ providers: Provider[]; presets: ProviderPreset[] }>("GET", "/providers"),
+  createProvider: (input: ProviderInput) => request<Provider>("POST", "/providers", input),
+  updateProvider: (id: string, input: Partial<ProviderInput>) => request<Provider>("PATCH", `/providers/${encodeURIComponent(id)}`, input),
+  deleteProvider: (id: string) => request<void>("DELETE", `/providers/${encodeURIComponent(id)}`),
+  providerModels: (id: string) => request<{ models: CatalogModel[]; error?: string }>("GET", `/providers/${encodeURIComponent(id)}/models`),
+  testProvider: (id: string) => request<{ ok: true; models: number } | { ok: false; error: string }>("POST", `/providers/${encodeURIComponent(id)}/test`),
+  prices: () => request<{ models: PriceRow[] }>("GET", "/prices"),
+  setPrice: (input: ModelRef & { input: number; output: number; cacheRead: number | null }) => request<{ models: PriceRow[] }>("PUT", "/prices", input),
+  clearPrice: (ref: ModelRef) =>
+    request<{ models: PriceRow[] }>("DELETE", `/prices?provider=${encodeURIComponent(ref.provider)}&model=${encodeURIComponent(ref.model)}`),
 
   spending: () => request<Spending>("GET", "/settings/spending"),
-  setSpending: (input: { dailyBudgetUsd: number | null; escalationModel: string | null; visionModel?: string | null }) => request<Spending>("PUT", "/settings/spending", input),
+  setSpending: (input: { dailyBudgetUsd: number | null; escalationModel: ModelRef | null; visionModel?: ModelRef | null }) => request<Spending>("PUT", "/settings/spending", input),
   maintenance: () => request<MaintenanceStatus>("GET", "/maintenance"),
   backupNow: () => request<{ name: string; removed: string[] }>("POST", "/maintenance/backup"),
   cleanupNow: () => request<{ removed: number }>("POST", "/maintenance/cleanup"),

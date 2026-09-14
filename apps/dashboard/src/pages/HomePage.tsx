@@ -10,7 +10,7 @@ export function HomePage() {
   const pending = useData(() => api.approvals("pending"), [approvalsVersion]);
   const projects = useData(() => api.projects(), [projectsVersion]);
   const h = health.data;
-  const missingKey = h && !h.cheaperInferenceKey;
+  const missingKeys = h?.missingKeys ?? [];
   const missingModels = h && !h.dshSettings;
 
   return (
@@ -20,20 +20,16 @@ export function HomePage() {
         <p className="lede">Your AI team plans, writes, tests and reviews changes in your repositories. Nothing reaches GitHub until you approve it.</p>
       </header>
 
-      {(missingKey || missingModels) && (
+      {(missingKeys.length > 0 || missingModels) && (
         <section className="notice notice-danger" aria-label="Setup">
-          <h2 className="block-title">Finish setup on the server</h2>
+          <h2 className="block-title">Finish setup</h2>
           <ul className="plain-list">
-            {missingKey && (
+            {missingKeys.length > 0 && (
               <li>
-                Add <code>CHEAPERINFERENCE_API_KEY</code> to <code>.env.local</code>, then restart the server.
+                Add an API key for {missingKeys.join(", ")} on the <a href="#/settings">Models page</a>.
               </li>
             )}
-            {missingModels && (
-              <li>
-                Run <code>npm run setup:dsh</code> so DeepSeek Harness knows which models to use.
-              </li>
-            )}
+            {missingModels && <li>Restart the server so it writes the DeepSeek Harness settings.</li>}
           </ul>
         </section>
       )}

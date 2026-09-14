@@ -2,13 +2,14 @@ import { resolve } from "node:path";
 import { Hono, type MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z, ZodError } from "zod";
-import type { Brain, BrainChange, Goal, Role } from "@ai-employee/brain";
+import type { Brain, BrainChange, Goal, ProviderType, Role } from "@ai-employee/brain";
 import { runCommand } from "@ai-employee/git";
 import type { AgentPool } from "./agents.ts";
 import { setupAuth } from "./auth.ts";
 import { hasDshSettings, type Config } from "./config.ts";
 import { deleteSecret, DeployError, deployStatus, queueWorkflowSetup, SECRET_VALUE_MAX, setSecret, type Gh } from "./deploy.ts";
-import { handleLlmRequest, type LlmProxyDeps } from "./llm.ts";
+import { handleLlmRequest, type LlmProxyDeps, type PriceBook } from "./llm.ts";
+import { modelsInUse, PROVIDER_ID, PROVIDER_PRESETS, PROVIDER_TYPES, type ProviderRegistry } from "./providers.ts";
 import type { Maintenance } from "./maintenance.ts";
 import { nextDay, spendingSettings, todaySpend } from "./spending.ts";
 import { APP_URL } from "./visual.ts";
@@ -100,6 +101,10 @@ function directLocalOnly(port: number): MiddlewareHandler {
 
 const blank = (v: string | null | undefined) => (v?.trim() ? v.trim() : null);
 
+/** Model ids across providers: deepseek-v4-pro, anthropic/claude-sonnet-4.5, llama3.1:8b. */
+const MODEL_ID = z.string().trim().min(1, "Choose a model").max(200).regex(/^[\w.:/@+-]+$/, "Use a model id such as deepseek-v4-pro");
+const modelRef = z.object({ provider: z.string().regex(PROVIDER_ID, "Choose a provider"), model: MODEL_ID });
+
 export function createApp(deps: {
   brain: Brain;
   orchestrator: Pick<Orchestrator, "runningTaskIds" | "cancel" | "continueTask" | "onApprovalDecided" | "manager">;
@@ -109,11 +114,14 @@ export function createApp(deps: {
   auth: AuthFile | null;
   notifier: Notifier;
   llm: LlmProxyDeps;
+  /** Model providers with their encrypted keys. */
+  providers: Pick<ProviderRegistry, "list" | "create" | "update" | "remove" | "catalog" | "missingKeys">;
+  prices: Pick<PriceBook, "resolve">;
   /** Runs the GitHub CLI; tests pass a fake. */
   gh?: Gh;
   maintenance?: Pick<Maintenance, "status" | "backup" | "cleanWorktrees">;
 }) {
-  const { brain, orchestrator, tokens, pool, config, auth, notifier, llm } = deps;
+  const { brain, orchestrator, tokens, pool, config, auth, notifier, llm, providers, prices } = deps;
   const gh: Gh = deps.gh ?? ((args, input) => runCommand("gh", args, config.rootDir, input));
   const app = new Hono();
   app.use("*", hostGuard(config.port, config.publicUrl));
@@ -129,7 +137,12 @@ export function createApp(deps: {
   app.all("/mcp", (c) => handleMcpRequest(brain, tokens, c.req.raw));
 
   app.use("/llm/*", directLocalOnly(config.port));
-  app.all("/llm/v1/*", (c) => handleLlmRequest(c.req.raw, c.req.path.slice("/llm/v1".length), llm));
+  // Settings written before providers existed call /llm/v1 for CheaperInference.
+  app.all("/llm/v1/*", (c) => handleLlmRequest(c.req.raw, "cheaperinference", c.req.path.slice("/llm".length), llm));
+  app.all("/llm/p/:provider/*", (c) => {
+    const provider = c.req.param("provider");
+    return handleLlmRequest(c.req.raw, provider, c.req.path.slice(`/llm/p/${provider}`.length), llm);
+  });
 
   app.use("/api/*", setupAuth(app, auth, { secureCookie: config.publicUrl?.protocol === "https:" }));
 
@@ -138,11 +151,14 @@ export function createApp(deps: {
     if (value === null) throw new HttpError(404, `${what} not found`);
     return value;
   };
+  const knownProvider = (id: string) => {
+    if (!brain.getProvider(id)) throw new HttpError(400, `There is no provider "${id}". Add it on the Models page first.`);
+  };
 
   api.get("/health", async (c) => {
     const running = orchestrator.runningTaskIds;
     return c.json({
-      cheaperInferenceKey: Boolean(config.cheaperInferenceKey),
+      missingKeys: providers.missingKeys(),
       dshSettings: hasDshSettings(config),
       agents: await pool.status(),
       currentTaskId: running[0] ?? null,
@@ -368,15 +384,16 @@ export function createApp(deps: {
   api.put("/settings/roles/:role", async (c) => {
     const role = z.enum(ROLES).parse(c.req.param("role")) as Role;
     const input = z
-      .object({ provider: z.string().min(1), model: z.string().min(1), reasoningEffort: z.string().nullable().optional() })
+      .object({ provider: z.string().min(1), model: MODEL_ID, reasoningEffort: z.string().nullable().optional() })
       .parse(await c.req.json());
+    knownProvider(input.provider);
     return c.json(brain.setRoleSetting(role, input.provider, input.model, blank(input.reasoningEffort)));
   });
 
   const spendingInput = z.object({
     dailyBudgetUsd: z.number().positive("The daily budget must be more than $0").max(1000).nullable(),
-    escalationModel: z.string().trim().regex(/^[\w.:/-]{1,100}$/, "Use a model id such as deepseek-v4-pro").nullable(),
-    visionModel: z.string().trim().regex(/^[\w.:/-]{1,100}$/, "Use a model id such as glm-5.3-flash").nullable().optional(),
+    escalationModel: modelRef.nullable(),
+    visionModel: modelRef.nullable().optional(),
   });
   const spending = () => ({ ...spendingSettings(brain), spentTodayUsd: todaySpend(brain), resetsAt: nextDay(new Date()).toISOString() });
 
@@ -384,22 +401,105 @@ export function createApp(deps: {
 
   api.put("/settings/spending", async (c) => {
     const input = spendingInput.parse(await c.req.json());
+    if (input.escalationModel) knownProvider(input.escalationModel.provider);
+    if (input.visionModel) knownProvider(input.visionModel.provider);
     brain.setAppSetting("dailyBudgetUsd", input.dailyBudgetUsd);
-    brain.setAppSetting("escalationModel", input.escalationModel || null);
-    if (input.visionModel !== undefined) brain.setAppSetting("visionModel", input.visionModel || null);
+    brain.setAppSetting("escalationModel", input.escalationModel);
+    if (input.visionModel !== undefined) brain.setAppSetting("visionModel", input.visionModel);
     return c.json(spending());
   });
 
-  api.get("/models", async (c) => {
-    if (!config.cheaperInferenceKey) return c.json({ models: [], error: "CHEAPERINFERENCE_API_KEY is not set" });
+  // ---- model providers: keys go in and never come back out
+  const providerInput = z.object({
+    name: z.string().trim().min(1, "Give the provider a name").max(60),
+    type: z.enum(PROVIDER_TYPES as [ProviderType, ...ProviderType[]]),
+    baseUrl: z.string().trim().min(1, "Enter the provider's base URL").max(300),
+    apiKey: z.string().trim().max(500).nullable().optional(),
+  });
+  /** Registry errors are the owner's input problems (400), or a provider still in use (409). */
+  const providerAction = <T>(action: () => T): T => {
     try {
-      const res = await fetch(`${config.cheaperInferenceBaseUrl}/models`, { headers: { Authorization: `Bearer ${config.cheaperInferenceKey}` } });
-      if (!res.ok) return c.json({ models: [], error: `CheaperInference returned HTTP ${res.status}` });
-      const body = (await res.json()) as { data?: { id: string }[] };
-      return c.json({ models: (body.data ?? []).map((m) => m.id).sort() });
+      return action();
+    } catch (error) {
+      if (error instanceof HttpError || error instanceof ZodError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new HttpError(/still used/.test(message) ? 409 : 400, message);
+    }
+  };
+
+  api.get("/providers", (c) => c.json({ providers: providers.list(), presets: PROVIDER_PRESETS }));
+
+  api.post("/providers", async (c) => {
+    const input = providerInput.parse(await c.req.json());
+    return c.json(providerAction(() => providers.create({ name: input.name, type: input.type, baseUrl: input.baseUrl, apiKey: input.apiKey || undefined })), 201);
+  });
+
+  api.patch("/providers/:id", async (c) => {
+    const id = c.req.param("id");
+    found(brain.getProvider(id), "Provider");
+    const input = providerInput.partial().parse(await c.req.json());
+    // An empty key field keeps the saved key; null removes it.
+    const apiKey = input.apiKey === null ? null : input.apiKey ? input.apiKey : undefined;
+    return c.json(providerAction(() => providers.update(id, { name: input.name, type: input.type, baseUrl: input.baseUrl, apiKey })));
+  });
+
+  api.delete("/providers/:id", (c) => {
+    const id = c.req.param("id");
+    found(brain.getProvider(id), "Provider");
+    providerAction(() => providers.remove(id));
+    return c.body(null, 204);
+  });
+
+  api.get("/providers/:id/models", async (c) => {
+    const id = c.req.param("id");
+    found(brain.getProvider(id), "Provider");
+    try {
+      return c.json({ models: await providers.catalog(id) });
     } catch (error) {
       return c.json({ models: [], error: (error as Error).message });
     }
+  });
+
+  api.post("/providers/:id/test", async (c) => {
+    const id = c.req.param("id");
+    found(brain.getProvider(id), "Provider");
+    try {
+      return c.json({ ok: true, models: (await providers.catalog(id)).length });
+    } catch (error) {
+      return c.json({ ok: false, error: (error as Error).message });
+    }
+  });
+
+  // ---- model prices for cost tracking: the owner's price, else the provider's list, else the public list
+  const priceRows = async () => ({
+    models: await Promise.all(
+      modelsInUse(brain).map(async (ref) => ({
+        ...ref,
+        providerName: brain.getProvider(ref.provider)?.name ?? ref.provider,
+        ...(await prices.resolve(ref.provider, ref.model)),
+      })),
+    ),
+  });
+  const priceInput = z.object({
+    provider: z.string().min(1),
+    model: MODEL_ID,
+    input: z.number().min(0).max(10_000),
+    output: z.number().min(0).max(10_000),
+    cacheRead: z.number().min(0).max(10_000).nullable().optional(),
+  });
+
+  api.get("/prices", async (c) => c.json(await priceRows()));
+
+  api.put("/prices", async (c) => {
+    const input = priceInput.parse(await c.req.json());
+    knownProvider(input.provider);
+    brain.setModelPrice(input.provider, input.model, { input: input.input, output: input.output, cacheRead: input.cacheRead ?? null });
+    return c.json(await priceRows());
+  });
+
+  api.delete("/prices", async (c) => {
+    brain.setModelPrice(c.req.query("provider") ?? "", c.req.query("model") ?? "", null);
+    return c.json(await priceRows());
   });
 
   // ---- backups and cleanup

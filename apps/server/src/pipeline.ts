@@ -31,7 +31,7 @@ import {
   type DetectedCheck,
   type QuickFinding,
 } from "./quickChecks.ts";
-import { dailyBudgetMessage, nextDay, spendingSettings, todaySpend } from "./spending.ts";
+import { dailyBudgetMessage, nextDay, sameModel, spendingSettings, todaySpend, type ModelRef } from "./spending.ts";
 import { appCommand, captureFindings, freePort, type CaptureResult, type VisualTools } from "./visual.ts";
 import { decidePermission, permissionResponse } from "./policy.ts";
 import * as prompts from "./prompts.ts";
@@ -556,17 +556,19 @@ export class Orchestrator {
 
     // One more try with a stronger model, in a fresh session that gets a summary instead of the failed rounds' context.
     const stronger = spendingSettings(this.brain).escalationModel;
-    const coderModel = this.brain.getRoleSetting("coder").model;
+    const coderSetting = this.brain.getRoleSetting("coder");
+    const coderModel: ModelRef = { provider: coderSetting.provider, model: coderSetting.model };
+    const label = (ref: ModelRef) => `${ref.provider}/${ref.model}`;
     let escalated = false;
-    if (!(outcome.approved && outcome.critics?.passed) && stronger && stronger !== coderModel) {
-      this.brain.addEvent(task.id, "escalated", { from: coderModel, to: stronger, reason: outcome.approved ? "critics" : "review" });
+    if (!(outcome.approved && outcome.critics?.passed) && stronger && !sameModel(stronger, coderModel)) {
+      this.brain.addEvent(task.id, "escalated", { from: label(coderModel), to: label(stronger), reason: outcome.approved ? "critics" : "review" });
       const prompt = prompts.coderEscalate(project, task, plan, memories, branch, feedbackLog.at(-1) ?? "", context.versions);
       try {
         outcome = await this.codeAndReview(task, project, running, context, prompt, { firstRound: outcome.lastRound + 1, rounds: ESCALATION_ROUNDS, model: stronger }, feedbackLog);
         escalated = true;
       } catch (error) {
         if (error instanceof CancelledError || signal.aborted) throw error;
-        this.brain.addEvent(task.id, "escalation_failed", { model: stronger, message: error instanceof Error ? error.message : String(error) });
+        this.brain.addEvent(task.id, "escalation_failed", { model: label(stronger), message: error instanceof Error ? error.message : String(error) });
       }
     }
     const { approved, verdict, critics, checksReport } = outcome;
@@ -577,7 +579,7 @@ export class Orchestrator {
         status: "needs_human",
         error: approved
           ? (critics?.message ?? "The critics did not pass the change.")
-          : `Not ready after ${outcome.lastRound} rounds${escalated ? ` (the last ones with ${stronger})` : ""}. The changes are left uncommitted on ${branch} in ${cwd} for you to inspect.`,
+          : `Not ready after ${outcome.lastRound} rounds${escalated && stronger ? ` (the last ones with ${label(stronger)})` : ""}. The changes are left uncommitted on ${branch} in ${cwd} for you to inspect.`,
       });
       this.brain.addEvent(task.id, "needs_human", { lastFeedback: feedbackLog.at(-1) ?? null, worktree: cwd, reason });
       await this.learn(task, project, cwd, plan, feedbackLog, running);
@@ -593,7 +595,7 @@ export class Orchestrator {
     running: RunningTask,
     context: BuildContext,
     firstPrompt: string,
-    options: { firstRound: number; rounds: number; model?: string },
+    options: { firstRound: number; rounds: number; model?: ModelRef },
     feedbackLog: string[],
   ): Promise<CodingOutcome> {
     const { worktree, diffBase, plan } = context;
@@ -855,7 +857,7 @@ export class Orchestrator {
     let summary = "";
     let reviewedBy: string | null = null;
     if (visionModel && capture.shots.length && !capture.loadError) {
-      const run = this.brain.startRun(task.id, "critic", "cheaperinference", visionModel, "visual");
+      const run = this.brain.startRun(task.id, "critic", visionModel.provider, visionModel.model, "visual");
       try {
         const reply = await visual.review(visionModel, prompts.visualCritic(task, plan, capture.shots, previous), capture.shots, signal);
         this.recordUsage(run.id, reply.usage);
@@ -863,11 +865,11 @@ export class Orchestrator {
         const verdict = prompts.extractJson<CriticVerdict>(reply.text);
         if (verdict) findings.push(...blockingFindings(verdict));
         summary = verdict?.summary ?? "The vision model's reply could not be read, so it did not block the change.";
-        reviewedBy = visionModel;
+        reviewedBy = `${visionModel.provider}/${visionModel.model}`;
       } catch (error) {
         this.brain.finishRun(run.id, signal.aborted ? "cancelled" : "failed");
         throwIfAborted(signal);
-        this.brain.addEvent(task.id, "visual_review_failed", { round, model: visionModel, message: error instanceof Error ? error.message : String(error) });
+        this.brain.addEvent(task.id, "visual_review_failed", { round, model: `${visionModel.provider}/${visionModel.model}`, message: error instanceof Error ? error.message : String(error) });
       }
     }
     const reported = findings.slice(0, 8);
@@ -1327,15 +1329,16 @@ export class Orchestrator {
     mode: PermissionMode,
     running: RunningTask,
     purpose?: string,
-    /** Another model than the role's setting, for the stronger-model try. */
-    modelOverride?: string,
+    /** Another model than the role's setting, for the stronger-model try; it may be at another provider. */
+    modelOverride?: ModelRef,
   ): Promise<AgentSession> {
     const signal = running.abort.signal;
     throwIfAborted(signal);
     const setting = this.brain.getRoleSetting(role);
-    const model = modelOverride ?? setting.model;
-    const run = this.brain.startRun(task.id, role, setting.provider, model, purpose ?? null);
-    this.brain.addEvent(task.id, "agent_started", { role, model: `${setting.provider}/${model}`, ...(purpose ? { purpose } : {}) }, run.id);
+    const provider = modelOverride?.provider ?? setting.provider;
+    const model = modelOverride?.model ?? setting.model;
+    const run = this.brain.startRun(task.id, role, provider, model, purpose ?? null);
+    this.brain.addEvent(task.id, "agent_started", { role, model: `${provider}/${model}`, ...(purpose ? { purpose } : {}) }, run.id);
     const recorder = new UpdateRecorder(this.brain, task.id, run.id, role);
     const token = this.tokens.issue(project.id, task.id);
 

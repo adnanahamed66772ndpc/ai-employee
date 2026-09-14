@@ -9,6 +9,8 @@ export interface Config {
   brainPath: string;
   dshHome: string;
   dshSettingsPath: string;
+  /** The copy of settings.yaml the agent user's DeepSeek Harness reads (a link to it); unset without an agent user. */
+  dshSharedSettingsPath: string | undefined;
   dashboardDist: string;
   port: number;
   cheaperInferenceBaseUrl: string;
@@ -50,6 +52,7 @@ export function loadConfig(): Config {
     brainPath: join(dataDir, "brain.db"),
     dshHome,
     dshSettingsPath: join(dshHome, "settings.yaml"),
+    dshSharedSettingsPath: agentUser ? join(projectsDir, ".tools", "dsh", "settings.yaml") : undefined,
     dashboardDist: join(rootDir, "apps", "dashboard", "dist"),
     // 7717 sits outside the port ranges Windows commonly reserves for Hyper-V/WSL.
     port: Number(process.env.AI_EMPLOYEE_PORT || 7717),

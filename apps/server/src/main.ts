@@ -6,14 +6,17 @@ import { Brain } from "@ai-employee/brain";
 import { AgentPool } from "./agents.ts";
 import { loadAuthFile } from "./auth.ts";
 import { createApp } from "./api.ts";
-import { hasDshSettings, loadConfig } from "./config.ts";
-import { PriceBook } from "./llm.ts";
+import { loadConfig } from "./config.ts";
+import { DshSettingsWriter } from "./dshSettings.ts";
+import { KeyStore } from "./keystore.ts";
+import { PriceBook, PublicPriceList } from "./llm.ts";
 import { Maintenance } from "./maintenance.ts";
 import { gatewayVision, prepareVisualTools, visualTools, type VisualTools } from "./visual.ts";
 import { McpTokens } from "./mcp.ts";
 import { TelegramNotifier, watchForNotifications } from "./notify.ts";
 import { NpmRegistry } from "./packages.ts";
 import { Orchestrator } from "./pipeline.ts";
+import { ProviderRegistry } from "./providers.ts";
 import { prepareProjectsDir, processInGroup } from "./workspace.ts";
 
 const log = (message: string) => console.log(`${new Date().toLocaleTimeString()} ${message}`);
@@ -44,13 +47,37 @@ if (config.agentUser) {
   log(`agents and checks run as the "${config.agentUser}" user`);
 }
 
+// Model providers: keys are encrypted with the server's secret and only decrypted for the gateway.
+const providers = new ProviderRegistry(brain, KeyStore.load(config.dataDir));
+if (config.cheaperInferenceKey && brain.getProvider("cheaperinference") && !brain.getProvider("cheaperinference")!.hasKey) {
+  providers.setKey("cheaperinference", config.cheaperInferenceKey);
+  log("saved CHEAPERINFERENCE_API_KEY from .env.local as the CheaperInference provider's encrypted key; change keys on the Models page from now on");
+}
+const publicPrices = new PublicPriceList();
+const prices = new PriceBook({
+  manual: (providerId, model) => {
+    const price = brain.getModelPrice(providerId, model);
+    return price ? { input: price.input, output: price.output, cacheRead: price.cacheRead ?? price.input } : null;
+  },
+  catalog: (providerId) => providers.catalog(providerId),
+  publicList: () => publicPrices.get(),
+});
+
+// DeepSeek Harness reads its providers and models from settings.yaml, kept in step with the Models page.
+const dshSettings = new DshSettingsWriter({
+  brain,
+  port: config.port,
+  paths: [config.dshSettingsPath, ...(config.dshSharedSettingsPath ? [config.dshSharedSettingsPath] : [])],
+  log,
+});
+dshSettings.start();
+
 const tokens = new McpTokens();
 const pool = new AgentPool(config, log);
-const prices = new PriceBook(config.cheaperInferenceBaseUrl, config.cheaperInferenceKey);
 let visual: VisualTools | undefined;
 try {
   const runnerScript = prepareVisualTools(config.rootDir, config.projectsDir, config.agentUser);
-  visual = visualTools({ runnerScript, chromePath: config.chromePath }, gatewayVision(config.cheaperInferenceBaseUrl, config.cheaperInferenceKey, prices));
+  visual = visualTools({ runnerScript, chromePath: config.chromePath }, gatewayVision(providers, prices));
 } catch (error) {
   log(`warning: the visual check is off, its browser tools could not be prepared: ${(error as Error).message}`);
 }
@@ -86,9 +113,10 @@ const app = createApp({
   auth,
   notifier,
   maintenance,
+  providers,
+  prices,
   llm: {
-    baseUrl: config.cheaperInferenceBaseUrl,
-    apiKey: config.cheaperInferenceKey,
+    provider: (id) => providers.gateway(id),
     prices,
     resolveRun: (body) => orchestrator.resolveRun(body),
     refusal: (taskId) => orchestrator.refusal(taskId),
@@ -103,8 +131,8 @@ if (existsSync(config.dashboardDist)) {
   app.get("*", (c) => c.html(indexHtml));
 }
 
-if (!config.cheaperInferenceKey) log("warning: CHEAPERINFERENCE_API_KEY is not set in .env.local; agents cannot call models");
-if (!hasDshSettings(config)) log("warning: .dsh-home/settings.yaml is missing; run: npm run setup:dsh");
+const missingKeys = providers.missingKeys();
+if (missingKeys.length) log(`warning: no API key is set for ${missingKeys.join(", ")}; add one on the Models page`);
 
 const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: config.port }, (info) => {
   log(`AI Employee is running at http://127.0.0.1:${info.port}`);
@@ -130,6 +158,7 @@ const shutdown = async () => {
   log("shutting down");
   server.close();
   maintenance.stop();
+  dshSettings.stop();
   await pool.stopAll();
   brain.close();
   process.exit(0);

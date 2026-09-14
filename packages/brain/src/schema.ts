@@ -248,6 +248,34 @@ const MIGRATIONS: string[] = [
   alter table projects add column start_cmd text;
   alter table projects add column app_url text;
   `,
+  // Model providers set up on the Models page. Keys are stored encrypted by the server; the brain never sees them in
+  // plain text. The stronger model and the screenshot model become provider + model pairs.
+  `
+  create table providers (
+    id text primary key,
+    name text not null,
+    type text not null check (type in ('openai','anthropic','gemini')),
+    base_url text not null,
+    key_cipher text,
+    key_last4 text,
+    created_at text not null default ${NOW},
+    updated_at text not null default ${NOW}
+  );
+  insert into providers (id, name, type, base_url) values ('cheaperinference', 'CheaperInference', 'openai', 'https://api.cheaperinference.com/v1');
+
+  create table model_prices (
+    provider_id text not null references providers(id) on delete cascade,
+    model text not null,
+    input_per_million real not null,
+    output_per_million real not null,
+    cache_read_per_million real,
+    updated_at text not null default ${NOW},
+    primary key (provider_id, model)
+  );
+
+  update app_settings set value = json_object('provider', 'cheaperinference', 'model', json_extract(value, '$'))
+    where key in ('escalationModel', 'visionModel') and json_type(value) = 'text';
+  `,
 ];
 
 /** Applies pending migrations; `target` stops early (tests use it to build an old database). */

@@ -576,7 +576,7 @@ it("gives the Coder one more try with the stronger model when the review rounds 
 
   expect(await untilStatus(task.id, ["awaiting_approval", "failed", "needs_human"])).toMatchObject({ status: "awaiting_approval", error: null });
   const events = brain.listEvents(task.id);
-  expect(events.find((e) => e.type === "escalated")?.payload).toEqual({ from: "deepseek-v4-flash", to: "deepseek-v4-pro", reason: "review" });
+  expect(events.find((e) => e.type === "escalated")?.payload).toEqual({ from: "cheaperinference/deepseek-v4-flash", to: "cheaperinference/deepseek-v4-pro", reason: "review" });
   expect(events.filter((e) => e.type === "review_verdict").map((e) => [e.payload.round, e.payload.approved])).toEqual([
     [1, false],
     [2, false],
@@ -639,7 +639,7 @@ it("starts the app for a UI change and sends what the screenshots show back to t
         visionPrompts.length === 1
           ? '```json\n{"summary": "Cut off", "findings": [{"file": "phone screenshot", "problem": "The cart total is cut off on the phone", "scenario": "Shoppers cannot see what they pay", "confidence": 90}]}\n```'
           : '```json\n{"summary": "Looks right", "findings": []}\n```';
-      return { text, usage: { inputTokens: 1_200, outputTokens: 60, cacheReadTokens: 0, costUsd: 0.0002 }, model };
+      return { text, usage: { inputTokens: 1_200, outputTokens: 60, cacheReadTokens: 0, costUsd: 0.0002 }, model: `${model.provider}/${model.model}` };
     },
   };
   const agent = new FakeAgent((text, cwd) => {
