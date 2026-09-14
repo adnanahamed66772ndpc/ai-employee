@@ -1,0 +1,53 @@
+{
+  "name": "ai-employee",
+  "version": "0.1.0",
+  "description": "Self-hosted AI engineering team: agents plan, code, test and review changes in your repositories and open pull requests only after you approve.",
+  "license": "MIT",
+  "author": "Adnan Ahamed (https://adnanahamedhimal.com)",
+  "homepage": "https://github.com/adnanahamed66772ndpc/ai-employee#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adnanahamed66772ndpc/ai-employee.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adnanahamed66772ndpc/ai-employee/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "coding-agent",
+    "code-review",
+    "self-hosted",
+    "deepseek",
+    "llm",
+    "mcp",
+    "developer-tools",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @ai-employee/server",
+    "dev:dashboard": "npm run dev -w @ai-employee/dashboard",
+    "build": "npm run build -w @ai-employee/dashboard",
+    "start": "npm run start -w @ai-employee/server",
+    "setup:dsh": "tsx --env-file-if-exists=.env.local scripts/setup-dsh.ts",
+    "smoke:acp": "tsx --env-file-if-exists=.env.local scripts/smoke-acp.ts",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "set-password": "tsx --env-file-if-exists=.env.local scripts/set-password.ts",
+    "telegram:chat-id": "tsx --env-file-if-exists=.env.local scripts/telegram-chat-id.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "tsx": "^4.23.13",
+    "typescript": "~5.9.2",
+    "vitest": "^5.0.0"
+  }
+}

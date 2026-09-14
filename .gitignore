@@ -1,0 +1,10 @@
+node_modules/
+.next/
+dist/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.dsh-home/
+data/

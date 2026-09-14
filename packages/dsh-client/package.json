@@ -1,0 +1,1 @@
+{"name":"@ai-employee/dsh-client","version":"0.0.0","private":true,"type":"module","exports":{".":"./src/index.ts"},"scripts":{"typecheck":"tsc --noEmit -p ."},"dependencies":{"@agentclientprotocol/sdk":"^1.4.0","@deepseek-ai/dsh":"^0.1.5-rc.1"}}
