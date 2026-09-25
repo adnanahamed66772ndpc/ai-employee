@@ -67,7 +67,12 @@ beforeEach(async () => {
   brain.setAppSetting("escalationModel", null);
 });
 
-afterEach(() => {
+const orchestrators: Orchestrator[] = [];
+
+afterEach(async () => {
+  // A task's last bookkeeping (and the tick after it) can still be running when a test has seen what it checks.
+  for (const orchestrator of orchestrators.splice(0)) await waitFor(() => orchestrator.runningTaskIds.length === 0, "the tasks to finish");
+  await new Promise((resolve) => setTimeout(resolve, 20));
   brain.close();
   rmSync(root, { recursive: true, force: true });
 });
@@ -84,6 +89,7 @@ function startOrchestrator(agent: AgentHandle, maxParallelTasks = 1, extra: Part
     maxParallelTasks,
   });
   orchestrator.start();
+  orchestrators.push(orchestrator);
   return orchestrator;
 }
 
@@ -160,6 +166,43 @@ it("works in a worktree, updates the handoff notes in the same commit and waits 
   expect(await runCommand("git", ["branch", "--list", branch], repo)).toContain(branch);
 });
 
+it("stops leftover agent processes whenever no task runs, before the next task starts", async () => {
+  const project = brain.createProject({ name: "Shop", localPath: repo });
+  const session = brain.createSession(project.id, "s");
+  const steps: string[] = [];
+  let finishSweep!: () => void;
+  let orchestrator!: Orchestrator;
+  const agent = new FakeAgent(() => {
+    steps.push(`prompt with ${orchestrator.runningTaskIds.length} running`);
+    return cancelled;
+  });
+  orchestrator = startOrchestrator(agent, 1, {
+    stopLeftovers: () => {
+      steps.push("sweep");
+      return new Promise<number>((resolve) => (finishSweep = () => resolve(0)));
+    },
+  });
+  // The first sweep (processes from before a restart) holds back the queue until it ends.
+  const first = brain.createTask(session.id, "First task");
+  await waitFor(() => steps.length === 1, "the first sweep");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(brain.getTask(first.id)?.status).toBe("queued");
+  finishSweep();
+  await untilStatus(first.id, ["failed", "cancelled", "awaiting_approval"]);
+  // The task ended, so the next sweep runs before the second task can start.
+  await waitFor(() => steps.at(-1) === "sweep", "the sweep after the first task");
+  const second = brain.createTask(session.id, "Second task");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(brain.getTask(second.id)?.status).toBe("queued");
+  finishSweep();
+  await untilStatus(second.id, ["failed", "cancelled", "awaiting_approval"]);
+  await waitFor(() => steps.filter((step) => step === "sweep").length === 3, "the sweep after the second task");
+  expect(steps.filter((step) => step !== "sweep").every((step) => step === "prompt with 1 running")).toBe(true);
+  expect(steps.indexOf("sweep", 1)).toBeGreaterThan(steps.indexOf("prompt with 1 running"));
+  finishSweep();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+});
+
 it("stops a task once its model calls reach the project's budget", async () => {
   const project = brain.createProject({ name: "Shop", localPath: repo, taskBudgetUsd: 0.01 });
   let refusal: string | null = null;
@@ -179,6 +222,21 @@ it("stops a task once its model calls reach the project's budget", async () => {
   expect(refusal).toMatch(/budget/);
   expect(brain.taskUsage(task.id).costUsd).toBeCloseTo(0.02);
   expect(brain.listEvents(task.id).find((e) => e.type === "task_failed")?.payload).toMatchObject({ reason: "budget" });
+});
+
+it("refuses model calls that match no run while no task is running, and allows them during a task", async () => {
+  const project = brain.createProject({ name: "Shop", localPath: repo });
+  let orchestrator!: Orchestrator;
+  let during: string | null = "not checked";
+  const agent = new FakeAgent(() => {
+    during = orchestrator.refusal(null);
+    return cancelled;
+  });
+  orchestrator = startOrchestrator(agent);
+  expect(orchestrator.refusal(null)).toMatch(/No task is running/);
+  const task = brain.createTask(brain.createSession(project.id, "s").id, "Some task");
+  await untilStatus(task.id, ["failed", "cancelled", "awaiting_approval"]);
+  expect(during).toBeNull();
 });
 
 it("runs tasks side by side and tells their model calls apart by worktree", async () => {
@@ -595,12 +653,14 @@ it("stops every task once all model calls today reach the daily budget, and star
   const project = brain.createProject({ name: "Shop", localPath: repo });
   let orchestrator!: Orchestrator;
   let refusal: string | null = null;
+  let unmatchedRefusal: string | null = null;
   let calls = 0;
   const agent = new FakeAgent(() => {
     calls++;
     const run = orchestrator.resolveRun("{}")!;
     orchestrator.recordUsage(run.runId, { inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 0, costUsd: 0.06 });
     refusal = orchestrator.refusal(run.taskId);
+    unmatchedRefusal = orchestrator.refusal(null);
     return cancelled;
   });
   orchestrator = startOrchestrator(agent);
@@ -610,6 +670,8 @@ it("stops every task once all model calls today reach the daily budget, and star
   const failed = await untilStatus(first.id, ["failed", "cancelled"]);
   expect(failed.error).toMatch(/\$0\.0600 today.*\$0\.05 daily budget/);
   expect(refusal).toMatch(/daily budget/);
+  // A call no run claims still obeys the daily budget.
+  expect(unmatchedRefusal).toMatch(/daily budget/);
 
   const second = brain.createTask(session.id, "Second task");
   await new Promise((resolve) => setTimeout(resolve, 300));

@@ -94,6 +94,11 @@ export interface OrchestratorOptions {
   visual?: VisualTools;
   /** The npm registry, for current stable versions and dependency checks; unset skips both. */
   packages?: PackageLookup;
+  /**
+   * Stops processes the agent user left running (see leftovers.ts) and returns how many it found. Called whenever no
+   * task runs, before the next one starts; unset without an agent user.
+   */
+  stopLeftovers?: () => Promise<number>;
 }
 
 export interface AgentSession {
@@ -252,6 +257,9 @@ export class Orchestrator {
   private readonly prompting = new Map<string, PromptingRun>();
   private lastPrompt: (PromptingRun & { at: number }) | null = null;
   private ticking = false;
+  /** A task ended (or the server started) since the last sweep for leftover agent processes. */
+  private sweepDue = true;
+  private sweeping = false;
   private dayTimer: NodeJS.Timeout | undefined;
   readonly manager: ProjectManager;
 
@@ -286,7 +294,11 @@ export class Orchestrator {
   }
 
   private tick(): void {
-    if (this.ticking) return;
+    if (this.ticking || this.sweeping) return;
+    if (this.sweepDue && this.running.size === 0 && this.options.stopLeftovers) {
+      this.sweepLeftovers(this.options.stopLeftovers);
+      return;
+    }
     this.ticking = true;
     try {
       while (this.running.size < this.maxParallel) {
@@ -300,12 +312,31 @@ export class Orchestrator {
         this.running.set(task.id, running);
         void this.process(task, running).finally(() => {
           this.running.delete(task.id);
+          this.sweepDue = true;
           this.tick();
         });
       }
     } finally {
       this.ticking = false;
     }
+  }
+
+  /**
+   * While no task runs, stops what agent-written code left running before the next task starts. Only then: a running
+   * task's own background process (a dev server the Coder started) cannot be told apart from a leftover.
+   */
+  private sweepLeftovers(stop: () => Promise<number>): void {
+    this.sweepDue = false;
+    this.sweeping = true;
+    void stop()
+      .then((count) => {
+        if (count) this.log(`stopped ${count} process(es) the agent user left running`);
+      })
+      .catch((error: Error) => this.log(`could not stop the agent user's leftover processes: ${error.message}`))
+      .finally(() => {
+        this.sweeping = false;
+        this.tick();
+      });
   }
 
   /** Why no model may be called and no task may start, once all tasks together reached today's budget. */
@@ -369,8 +400,12 @@ export class Orchestrator {
     return last && Date.now() - last.at < LATE_CALL_MS ? pick(last) : null;
   }
 
-  /** Why model calls for this task are refused, if they are. */
-  refusal(taskId: string): string | null {
+  /**
+   * Why model calls for this task are refused, if they are. A call that matches no run (`null`) is refused while no
+   * task is running: the gateway answers any local process, for example one left behind by agent-written code.
+   */
+  refusal(taskId: string | null): string | null {
+    if (taskId === null) return this.running.size === 0 ? "No task is running, so the model gateway takes no calls" : this.dailyBudgetStop();
     const reason = this.running.get(taskId)?.stopReason;
     if (reason) return reason === CANCELLED ? "The task was cancelled" : reason;
     return this.dailyBudgetStop();
@@ -1015,6 +1050,7 @@ export class Orchestrator {
     } finally {
       await coder?.close();
       this.running.delete(task.id);
+      this.sweepDue = true;
       if (temporary && worktree) await git.removeWorktree(repo, worktree).catch(() => {});
     }
   }

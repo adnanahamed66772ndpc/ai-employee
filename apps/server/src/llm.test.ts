@@ -159,6 +159,19 @@ describe("model gateway", () => {
     expect(forwarded).toHaveLength(0);
   });
 
+  it("asks about calls that match no agent run, and refuses them when told to", async () => {
+    const asked: (string | null)[] = [];
+    const { deps, forwarded, recorded } = setup({
+      resolveRun: () => null,
+      refusal: (taskId) => (asked.push(taskId), "No task is running"),
+    });
+    const response = await handleLlmRequest(completion({ model: "m", messages: [] }), "cheaperinference", "/v1/chat/completions", deps);
+    expect(response.status).toBe(403);
+    expect(asked).toEqual([null]);
+    expect(forwarded).toHaveLength(0);
+    expect(recorded).toHaveLength(0);
+  });
+
   it("offers only each type's endpoint, needs a key except for a local provider, and explains an unknown provider", async () => {
     const { deps, forwarded } = setup();
     expect((await handleLlmRequest(completion(null, "GET"), "cheaperinference", "/v1/models", deps)).status).toBe(404);

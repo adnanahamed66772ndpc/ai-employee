@@ -50,7 +50,7 @@ Everything runs on your own machine or server. The whole "brain" is one SQLite f
 | ✅ **You approve** | The Git agent writes the commit and pull request. The branch is **pushed only after you click approve** in the dashboard. |
 | 🧠 **Memory and handoff notes** | Lessons are saved as project or global memory, and each repository's `.ai/` notes are updated in the same commit. |
 | 🗺️ **Big goals** | "Build an online shop" becomes epics you approve. Each epic runs as small tasks on its own branch and becomes one pull request. |
-| 🔌 **Any model provider** | OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, Groq, Mistral, xAI, Ollama or any OpenAI-compatible API. Add providers and keys on the Models page and pick a provider and model for each agent. |
+| 🔌 **Any model provider** | OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, Groq, Mistral, NVIDIA, xAI, Ollama, or any other OpenAI-compatible, Anthropic-compatible or Gemini API. Add providers and keys on the Models page and pick a provider and model for each agent. |
 | 💸 **Cost control** | Tokens and cost for every agent run, a budget per task, a daily budget for all projects, and one retry with a stronger model when the cheap one gets stuck. |
 | 🚀 **Deploy panel** | Set GitHub Actions secrets from the dashboard and let the team write a matrix build-and-deploy workflow. |
 
@@ -149,7 +149,7 @@ npm start            # http://127.0.0.1:7717
 ### 2. Add a model provider
 
 1. Open **http://127.0.0.1:7717** and go to **Models**.
-2. Choose **Add provider** and start from a preset: OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, CheaperInference, Groq, Mistral, xAI, Together AI or Ollama. Any other OpenAI-compatible API works with its base URL.
+2. Choose **Add provider** and start from a preset: OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, CheaperInference, Groq, Mistral, NVIDIA, xAI, Together AI or Ollama. For an API without a preset, choose **Other API** and enter its base URL. You never pick the API type: OpenAI-compatible, Anthropic or Gemini is detected from the address and the key.
 3. Paste the provider's API key and choose **Test**. The key is encrypted on the server (AES-256-GCM) and never shown again. Agents never see it: their calls go through the server's gateway, which adds the key.
 4. Under **Agents**, choose a provider and model for each agent, then pick the stronger retry and screenshot models under **Spending**. The model field suggests the provider's own model list.
 
@@ -223,7 +223,7 @@ AI Employee gives AI agents a shell, so it is built to contain them:
 
 - **Local-only server.** It listens on `127.0.0.1` and rejects cross-site requests. The memory endpoint and model gateway answer direct local requests only, and nginx returns 404 for them.
 - **Sandboxed agents.** Agents run inside DeepSeek Harness's sandbox (Landlock or bwrap on Linux). The Planner, Reviewer, critics, Git and memory agents are read-only. The Coder can only write inside its task worktree. Requests for wider access are always rejected.
-- **A separate Linux user on servers.** Agents run with no sudo, docker, GitHub credentials or model API key. Project checkouts and `.git` folders are closed to them, and repository hooks never run. **Without the agent user, the sandbox cannot stop an agent from using your Git credentials.**
+- **A separate Linux user on servers.** Agents run with no sudo, docker, GitHub credentials or model API key. Project checkouts and `.git` folders are closed to them, repository hooks never run, and processes their code leaves running are stopped between tasks. **Without the agent user, the sandbox cannot stop an agent from using your Git credentials.**
 - **No telemetry.** DeepSeek Harness telemetry is disabled (`DSH_TELEMETRY_MODE=DISABLED`).
 - **Secrets stay out.** Secrets are blocked from memory, handoff notes and commits. Deploy secrets go straight to GitHub and are never stored.
 - **Nothing is pushed without your approval**, and you should still review every pull request before merging.
