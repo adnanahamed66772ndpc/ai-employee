@@ -14,11 +14,24 @@ export interface CaptureResult {
   stderr: string;
 }
 
+/** How long a finished command's output may take to arrive before its pipes are closed. */
+const DRAIN_MS = 2_000;
+
 function start(command: string, cwd: string, runner?: string[]): ChildProcess {
   const env = { ...process.env, CI: "1", GIT_TERMINAL_PROMPT: "0" };
-  return runner?.length
+  const child = runner?.length
     ? spawn(runner[0]!, [...runner.slice(1), cwd, command], { env, windowsHide: true })
     : spawn(command, { cwd, shell: true, windowsHide: true, env });
+  // A background process the command left running (`npm run dev &`) keeps its output pipes open, so "close" would
+  // never come and the task would hang, even past its timeout. Once the command itself has exited, stop waiting.
+  child.once("exit", () => {
+    const timer = setTimeout(() => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }, DRAIN_MS);
+    child.once("close", () => clearTimeout(timer));
+  });
+  return child;
 }
 
 /** Stops the child on timeout or abort; returns a cleanup function. */

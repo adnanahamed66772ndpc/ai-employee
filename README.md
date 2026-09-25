@@ -223,7 +223,7 @@ AI Employee gives AI agents a shell, so it is built to contain them:
 
 - **Local-only server.** It listens on `127.0.0.1` and rejects cross-site requests. The memory endpoint and model gateway answer direct local requests only, and nginx returns 404 for them.
 - **Sandboxed agents.** Agents run inside DeepSeek Harness's sandbox (Landlock or bwrap on Linux). The Planner, Reviewer, critics, Git and memory agents are read-only. The Coder can only write inside its task worktree. Requests for wider access are always rejected.
-- **A separate Linux user on servers.** Agents run with no sudo, docker, GitHub credentials or model API key. Project checkouts and `.git` folders are closed to them, and repository hooks never run. **Without the agent user, the sandbox cannot stop an agent from using your Git credentials.**
+- **A separate Linux user on servers.** Agents run with no sudo, docker, GitHub credentials or model API key. Project checkouts and `.git` folders are closed to them, repository hooks never run, and processes their code leaves running are stopped between tasks. **Without the agent user, the sandbox cannot stop an agent from using your Git credentials.**
 - **No telemetry.** DeepSeek Harness telemetry is disabled (`DSH_TELEMETRY_MODE=DISABLED`).
 - **Secrets stay out.** Secrets are blocked from memory, handoff notes and commits. Deploy secrets go straight to GitHub and are never stored.
 - **Nothing is pushed without your approval**, and you should still review every pull request before merging.

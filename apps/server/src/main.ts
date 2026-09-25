@@ -6,9 +6,11 @@ import { Brain } from "@ai-employee/brain";
 import { AgentPool } from "./agents.ts";
 import { loadAuthFile } from "./auth.ts";
 import { createApp } from "./api.ts";
+import { runShellCommand } from "./checks.ts";
 import { loadConfig } from "./config.ts";
 import { DshSettingsWriter } from "./dshSettings.ts";
 import { KeyStore } from "./keystore.ts";
+import { stopLeftovers } from "./leftovers.ts";
 import { PriceBook, PublicPriceList } from "./llm.ts";
 import { Maintenance } from "./maintenance.ts";
 import { gatewayVision, prepareVisualTools, visualTools, type VisualTools } from "./visual.ts";
@@ -95,6 +97,14 @@ const orchestrator = new Orchestrator({
   maxParallelTasks: config.maxParallelTasks,
   visual,
   packages: new NpmRegistry(),
+  stopLeftovers:
+    config.agentUser && config.checkRunner
+      ? () =>
+          stopLeftovers({
+            agentUser: config.agentUser!,
+            runAsAgent: (command) => runShellCommand(command, config.worktreesDir, 30_000, new AbortController().signal, config.checkRunner),
+          })
+      : undefined,
 });
 await orchestrator.manager.recover(interrupted);
 

@@ -107,6 +107,9 @@ Events are stored in `events` and pushed to the dashboard over SSE (`/api/stream
   - **Launchers:** DeepSeek Harness starts through a launcher as the unprivileged agent user, and setup commands and checks run through a runner as that user.
   - **No access:** the agent user has no sudo, docker, GitHub credentials or model API key, and cannot read the server user's home.
   - **Writable folders:** only each task worktree is writable by the agent user's group. The projects folder, project checkouts and `.git` are not.
+  - **Leftover processes:**
+    - Between tasks, the server stops every agent-user process its launchers did not start, such as a dev server a test left running.
+    - A check command ends when the command exits, even if such a process still holds its output.
 - **Sandbox:** most roles are read-only. The Coder may write only its worktree. Requests for wider sandbox access are rejected.
 - **Git hardening:** server Git calls run with hooks and fsmonitor disabled, `--no-ext-diff` and `--no-verify`, and address worktrees through their real Git directory. Commands use `execFile`, never a shell.
 - **Input validation:** zod schemas, plain repository and folder names, and folder browsing limited to the projects folder (realpath-checked).
