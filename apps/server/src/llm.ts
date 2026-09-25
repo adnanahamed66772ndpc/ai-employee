@@ -150,8 +150,11 @@ export interface LlmProxyDeps {
   prices: Pick<PriceBook, "get">;
   /** The agent run a model call belongs to, found from the request; null when it cannot be told. */
   resolveRun(requestBody: string): { runId: string; taskId: string } | null;
-  /** A reason to refuse calls for this task (its budget is spent), or null. */
-  refusal(taskId: string): string | null;
+  /**
+   * A reason to refuse calls for this task (its budget is spent), or null. `null` asks about a call that matches no
+   * agent run: any local process can reach the gateway, so such calls still obey the daily budget.
+   */
+  refusal(taskId: string | null): string | null;
   record(runId: string, usage: Usage): void;
   log(message: string): void;
   fetch?: typeof fetch;
@@ -237,7 +240,7 @@ export async function handleLlmRequest(request: Request, providerId: string, sub
     return errorResponse(400, "The request body is not JSON");
   }
   const run = deps.resolveRun(text);
-  const refusal = run && deps.refusal(run.taskId);
+  const refusal = deps.refusal(run?.taskId ?? null);
   // 403 rather than 429 so the agent does not retry.
   if (refusal) return errorResponse(403, refusal, "budget_exceeded");
   // Gemini's OpenAI endpoint reports usage on its own; OpenAI-style APIs need to be asked for it when streaming.

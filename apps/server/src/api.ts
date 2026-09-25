@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { Hono, type MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z, ZodError } from "zod";
@@ -19,8 +18,10 @@ import type { AuthFile } from "./password.ts";
 import type { Orchestrator } from "./pipeline.ts";
 import {
   browseProjectsDir,
+  checkProjectFolder,
   cloneProject,
   createNewProject,
+  folderTaken,
   listGithubRepos,
   ProjectError,
   registerProject,
@@ -192,18 +193,22 @@ export function createApp(deps: {
   api.get("/github/repos", async (c) => c.json(await listGithubRepos(config)));
 
   api.patch("/projects/:id", async (c) => {
-    found(brain.getProject(c.req.param("id")), "Project");
+    const id = c.req.param("id");
+    found(brain.getProject(id), "Project");
     const input = projectInput.partial().parse(await c.req.json());
+    // A moved project gets the same folder checks as a new one.
+    const localPath = input.localPath ? await checkProjectFolder(config, input.localPath) : undefined;
+    if (localPath && folderTaken(brain, localPath, id)) throw new HttpError(409, "This folder is already a project");
     const patch = {
       ...input,
-      ...(input.localPath ? { localPath: resolve(input.localPath) } : {}),
+      ...(localPath ? { localPath } : {}),
       ...("setupCmd" in input ? { setupCmd: blank(input.setupCmd) } : {}),
       ...("testCmd" in input ? { testCmd: blank(input.testCmd) } : {}),
       ...("lintCmd" in input ? { lintCmd: blank(input.lintCmd) } : {}),
       ...("startCmd" in input ? { startCmd: blank(input.startCmd) } : {}),
       ...("appUrl" in input ? { appUrl: blank(input.appUrl) } : {}),
     };
-    return c.json(brain.updateProject(c.req.param("id"), patch));
+    return c.json(brain.updateProject(id, patch));
   });
 
   api.delete("/projects/:id", (c) => {

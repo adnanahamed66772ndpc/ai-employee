@@ -181,6 +181,21 @@ it("stops a task once its model calls reach the project's budget", async () => {
   expect(brain.listEvents(task.id).find((e) => e.type === "task_failed")?.payload).toMatchObject({ reason: "budget" });
 });
 
+it("refuses model calls that match no run while no task is running, and allows them during a task", async () => {
+  const project = brain.createProject({ name: "Shop", localPath: repo });
+  let orchestrator!: Orchestrator;
+  let during: string | null = "not checked";
+  const agent = new FakeAgent(() => {
+    during = orchestrator.refusal(null);
+    return cancelled;
+  });
+  orchestrator = startOrchestrator(agent);
+  expect(orchestrator.refusal(null)).toMatch(/No task is running/);
+  const task = brain.createTask(brain.createSession(project.id, "s").id, "Some task");
+  await untilStatus(task.id, ["failed", "cancelled", "awaiting_approval"]);
+  expect(during).toBeNull();
+});
+
 it("runs tasks side by side and tells their model calls apart by worktree", async () => {
   const project = brain.createProject({ name: "Shop", localPath: repo });
   let orchestrator!: Orchestrator;
@@ -595,12 +610,14 @@ it("stops every task once all model calls today reach the daily budget, and star
   const project = brain.createProject({ name: "Shop", localPath: repo });
   let orchestrator!: Orchestrator;
   let refusal: string | null = null;
+  let unmatchedRefusal: string | null = null;
   let calls = 0;
   const agent = new FakeAgent(() => {
     calls++;
     const run = orchestrator.resolveRun("{}")!;
     orchestrator.recordUsage(run.runId, { inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 0, costUsd: 0.06 });
     refusal = orchestrator.refusal(run.taskId);
+    unmatchedRefusal = orchestrator.refusal(null);
     return cancelled;
   });
   orchestrator = startOrchestrator(agent);
@@ -610,6 +627,8 @@ it("stops every task once all model calls today reach the daily budget, and star
   const failed = await untilStatus(first.id, ["failed", "cancelled"]);
   expect(failed.error).toMatch(/\$0\.0600 today.*\$0\.05 daily budget/);
   expect(refusal).toMatch(/daily budget/);
+  // A call no run claims still obeys the daily budget.
+  expect(unmatchedRefusal).toMatch(/daily budget/);
 
   const second = brain.createTask(session.id, "Second task");
   await new Promise((resolve) => setTimeout(resolve, 300));

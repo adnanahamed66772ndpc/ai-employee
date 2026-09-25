@@ -369,8 +369,12 @@ export class Orchestrator {
     return last && Date.now() - last.at < LATE_CALL_MS ? pick(last) : null;
   }
 
-  /** Why model calls for this task are refused, if they are. */
-  refusal(taskId: string): string | null {
+  /**
+   * Why model calls for this task are refused, if they are. A call that matches no run (`null`) is refused while no
+   * task is running: the gateway answers any local process, for example one left behind by agent-written code.
+   */
+  refusal(taskId: string | null): string | null {
+    if (taskId === null) return this.running.size === 0 ? "No task is running, so the model gateway takes no calls" : this.dailyBudgetStop();
     const reason = this.running.get(taskId)?.stopReason;
     if (reason) return reason === CANCELLED ? "The task was cancelled" : reason;
     return this.dailyBudgetStop();

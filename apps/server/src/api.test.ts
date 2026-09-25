@@ -4,6 +4,10 @@ import { createApp } from "./api.ts";
 import type { Config } from "./config.ts";
 import type { Gh } from "./deploy.ts";
 import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runCommand } from "@ai-employee/git";
 import { KeyStore } from "./keystore.ts";
 import { PriceBook, type LlmProxyDeps } from "./llm.ts";
 import { ProviderRegistry } from "./providers.ts";
@@ -29,7 +33,7 @@ const config = {
   projectsDir: "projects",
 } as unknown as Config;
 
-function makeApp(options: { telegram?: boolean; gh?: Gh } = {}) {
+function makeApp(options: { telegram?: boolean; gh?: Gh; config?: Partial<Config> } = {}) {
   const notifier: Notifier = { configured: options.telegram ?? false, send: async (text) => void sent.push(text) };
   const catalog = (async () =>
     Response.json({ data: [{ id: "deepseek-v4-pro" }, { id: "deepseek-v4-flash", pricing: { input_per_million: 0.1, output_per_million: 0.2 } }] })) as unknown as typeof fetch;
@@ -62,7 +66,7 @@ function makeApp(options: { telegram?: boolean; gh?: Gh } = {}) {
     },
     tokens: new McpTokens(),
     pool: { status: async () => ({ "read-only": true, "workspace-write": false }) },
-    config,
+    config: { ...config, ...options.config },
     auth: null,
     notifier,
     llm,
@@ -92,6 +96,36 @@ describe("api", () => {
     const response = await makeApp()("/api/projects", json({ localPath: "/srv/ai-projects/shop", taskBudgetUsd: -1 }));
     expect(response.status).toBe(400);
     expect(((await response.json()) as { error: string }).error).toMatch(/budget/);
+  });
+
+  it("only takes project folders that are git repositories inside the projects folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aie-projects-"));
+    try {
+      const projectsDir = join(root, "projects");
+      const worktreesDir = join(projectsDir, ".worktrees");
+      const repo = async (path: string) => (mkdirSync(path, { recursive: true }), await runCommand("git", ["init", "-q", "-b", "main"], path), path);
+      const shop = await repo(join(projectsDir, "shop"));
+      const outside = await repo(join(root, "outside"));
+      const worktree = await repo(join(worktreesDir, "task-1"));
+      mkdirSync(join(projectsDir, "plain"));
+      symlinkSync(outside, join(projectsDir, "link"));
+      const call = makeApp({ config: { projectsDir, worktreesDir } });
+      const add = (localPath: string) => call("/api/projects", json({ localPath, defaultBranch: "main" }));
+
+      for (const refused of [outside, join(projectsDir, "link"), worktree, join(projectsDir, "plain"), projectsDir, `${projectsDir}/../outside`]) {
+        expect((await add(refused)).status, refused).toBe(400);
+      }
+      const created = await add(shop);
+      expect(created.status).toBe(201);
+      const project = (await created.json()) as { id: string };
+      expect((await add(shop)).status).toBe(409);
+
+      const move = (localPath: string) => call(`/api/projects/${project.id}`, { ...json({ localPath }), method: "PATCH" });
+      expect((await move(outside)).status).toBe(400);
+      expect(brain.getProject(project.id)?.localPath).toBe(realpathSync(shop));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps the model gateway local", async () => {

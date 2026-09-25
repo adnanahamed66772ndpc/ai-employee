@@ -76,15 +76,20 @@ export async function addHandoffTemplate(localPath: string, name: string, branch
   return true;
 }
 
-/** Adds an existing git repository as a project. */
-export async function registerProject(brain: Brain, config: Config, folder: string, options: ProjectOptions): Promise<Project> {
-  const localPath = resolve(folder);
-  if (!existsSync(localPath) || !statSync(localPath).isDirectory()) throw new ProjectError(400, `Folder not found: ${localPath}`);
+/**
+ * The real path of a folder the browser named as a project. It must be a git repository inside the projects folder,
+ * outside the agents' worktrees, and (with an agent user) closed to that user. A symlink counts as where it points.
+ */
+export async function checkProjectFolder(config: Config, folder: string): Promise<string> {
+  const requested = resolve(folder);
+  if (!existsSync(requested) || !statSync(requested).isDirectory()) throw new ProjectError(400, `Folder not found: ${requested}`);
+  const localPath = realpathSync(requested);
+  const real = (path: string) => (existsSync(path) ? realpathSync(path) : resolve(path));
+  const root = real(config.projectsDir);
+  if (localPath === root || !isInside(root, localPath)) throw new ProjectError(400, `Only folders inside the projects folder (${root}) can be projects`);
+  if (isInside(real(config.worktreesDir), localPath)) throw new ProjectError(400, "A task's work folder cannot be a project");
   if (!(await isGitRepo(localPath))) {
     throw new ProjectError(400, `${localPath} is not a git repository. Use "New repository" to create one.`);
-  }
-  if (brain.listProjects().some((p) => resolve(p.localPath).toLowerCase() === localPath.toLowerCase())) {
-    throw new ProjectError(409, "This folder is already a project");
   }
   if (config.agentUser) {
     try {
@@ -93,6 +98,17 @@ export async function registerProject(brain: Brain, config: Config, folder: stri
       throw new ProjectError(400, (error as Error).message);
     }
   }
+  return localPath;
+}
+
+/** Whether another project already uses this folder. */
+export const folderTaken = (brain: Brain, localPath: string, exceptId?: string) =>
+  brain.listProjects().some((p) => p.id !== exceptId && resolve(p.localPath).toLowerCase() === localPath.toLowerCase());
+
+/** Adds an existing git repository as a project. */
+export async function registerProject(brain: Brain, config: Config, folder: string, options: ProjectOptions): Promise<Project> {
+  const localPath = await checkProjectFolder(config, folder);
+  if (folderTaken(brain, localPath)) throw new ProjectError(409, "This folder is already a project");
   const name = options.name?.trim() || basename(localPath);
   const defaultBranch = options.defaultBranch ?? (await currentBranch(localPath));
   try {
