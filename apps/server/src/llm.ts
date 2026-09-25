@@ -95,7 +95,7 @@ export function parsePublicPrices(json: unknown): Map<string, Pricing> {
   return prices;
 }
 
-const PUBLIC_PREFIXES = ["", "anthropic/", "gemini/", "deepseek/", "openrouter/", "xai/", "groq/", "mistral/", "together_ai/"];
+const PUBLIC_PREFIXES = ["", "anthropic/", "gemini/", "deepseek/", "openrouter/", "xai/", "groq/", "mistral/", "together_ai/", "nvidia_nim/"];
 
 export function publicPrice(prices: Map<string, Pricing>, model: string): Pricing | null {
   const id = model.toLowerCase();

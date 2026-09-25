@@ -55,7 +55,8 @@ export interface PriceRow extends ModelRef {
 
 export interface ProviderInput {
   name: string;
-  type: ProviderType;
+  /** Leave out to let the server detect it from the base URL and key. */
+  type?: ProviderType;
   baseUrl: string;
   /** Leave out to keep the saved key; null removes it. */
   apiKey?: string | null;

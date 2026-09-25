@@ -115,7 +115,7 @@ export function createApp(deps: {
   notifier: Notifier;
   llm: LlmProxyDeps;
   /** Model providers with their encrypted keys. */
-  providers: Pick<ProviderRegistry, "list" | "create" | "update" | "remove" | "catalog" | "missingKeys">;
+  providers: Pick<ProviderRegistry, "list" | "gateway" | "create" | "update" | "remove" | "catalog" | "missingKeys" | "detectType">;
   prices: Pick<PriceBook, "resolve">;
   /** Runs the GitHub CLI; tests pass a fake. */
   gh?: Gh;
@@ -412,7 +412,7 @@ export function createApp(deps: {
   // ---- model providers: keys go in and never come back out
   const providerInput = z.object({
     name: z.string().trim().min(1, "Give the provider a name").max(60),
-    type: z.enum(PROVIDER_TYPES as [ProviderType, ...ProviderType[]]),
+    type: z.enum(PROVIDER_TYPES as [ProviderType, ...ProviderType[]]).optional(),
     baseUrl: z.string().trim().min(1, "Enter the provider's base URL").max(300),
     apiKey: z.string().trim().max(500).nullable().optional(),
   });
@@ -429,18 +429,42 @@ export function createApp(deps: {
 
   api.get("/providers", (c) => c.json({ providers: providers.list(), presets: PROVIDER_PRESETS }));
 
+  /** The owner never picks the API type: the address says it, or the API answers the OpenAI or the Anthropic way. */
+  const detectType = async (baseUrl: string, apiKey: string | null) => {
+    try {
+      return await providers.detectType(baseUrl, apiKey);
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : String(error));
+    }
+  };
+
   api.post("/providers", async (c) => {
     const input = providerInput.parse(await c.req.json());
-    return c.json(providerAction(() => providers.create({ name: input.name, type: input.type, baseUrl: input.baseUrl, apiKey: input.apiKey || undefined })), 201);
+    const apiKey = input.apiKey || undefined;
+    const type = input.type ?? (await detectType(input.baseUrl, apiKey ?? null));
+    return c.json(providerAction(() => providers.create({ name: input.name, type, baseUrl: input.baseUrl, apiKey })), 201);
   });
 
   api.patch("/providers/:id", async (c) => {
     const id = c.req.param("id");
-    found(brain.getProvider(id), "Provider");
+    const current = found(brain.getProvider(id), "Provider");
     const input = providerInput.partial().parse(await c.req.json());
     // An empty key field keeps the saved key; null removes it.
     const apiKey = input.apiKey === null ? null : input.apiKey ? input.apiKey : undefined;
-    return c.json(providerAction(() => providers.update(id, { name: input.name, type: input.type, baseUrl: input.baseUrl, apiKey })));
+    let type = input.type;
+    // A new address may be another kind of API: detect it again with the new key, or the saved one.
+    if (type === undefined && input.baseUrl !== undefined && input.baseUrl.trim().replace(/\/+$/, "") !== current.baseUrl) {
+      let key = apiKey ?? null;
+      if (apiKey === undefined) {
+        try {
+          key = providers.gateway(id)?.apiKey ?? null;
+        } catch {
+          key = null;
+        }
+      }
+      type = await detectType(input.baseUrl, key);
+    }
+    return c.json(providerAction(() => providers.update(id, { name: input.name, type, baseUrl: input.baseUrl, apiKey })));
   });
 
   api.delete("/providers/:id", (c) => {

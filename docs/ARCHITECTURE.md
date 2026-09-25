@@ -39,6 +39,7 @@ All agents are [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harnes
 **Providers (`providers.ts`, `keystore.ts`, `dshSettings.ts`, `llm.ts`):**
 - **Types:** OpenAI-compatible (any base URL, including Ollama), Anthropic Messages, or Gemini's OpenAI endpoint. They are added on the **Models** page.
 - **Keys:** encrypted with AES-256-GCM using a 32-byte secret (`AI_EMPLOYEE_SECRET_KEY` or `data/secret.key`). They are decrypted only for the gateway, model lists and screenshot reviews, and never returned to the browser.
+- **API type:** detected, never picked: from the base URL (Anthropic and Gemini hosts, `/anthropic` routes, the presets), else by asking the API for its models the OpenAI way and then the Anthropic way. An API that answers neither is treated as OpenAI-compatible.
 - **Models:** each role, the stronger retry and the screenshot model is a provider and model pair.
 - **DeepSeek Harness settings:** the server writes `settings.yaml` from the providers and models in use. Every provider points at the gateway (`http://127.0.0.1:7717/llm/p/<id>/v1`, or `…/llm/p/<id>` for Anthropic) with a placeholder key. On a server the agent user's settings link to a shared copy, so changes apply without a restart.
 - **Gateway:** adds the real key (Bearer, or `x-api-key` for Anthropic), retries outages, meters OpenAI and Anthropic usage, and refuses calls once a budget is spent.

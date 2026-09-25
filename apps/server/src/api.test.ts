@@ -263,7 +263,7 @@ describe("model providers", () => {
     expect(await post.json()).toMatchObject({ id: "openai", hasKey: true, keyLast4: "1234" });
     const listed = await (await call("/api/providers")).text();
     expect(listed).not.toContain("abcdefghijkl");
-    expect((JSON.parse(listed) as { presets: { id: string }[] }).presets.map((p) => p.id)).toContain("anthropic");
+    expect((JSON.parse(listed) as { presets: { id: string }[] }).presets.map((p) => p.id)).toEqual(expect.arrayContaining(["anthropic", "nvidia"]));
 
     const patched = await call("/api/providers/openai", { ...json({ name: "OpenAI work", apiKey: "" }), method: "PATCH" });
     expect(await patched.json()).toMatchObject({ name: "OpenAI work", hasKey: true, keyLast4: "1234" });
@@ -276,6 +276,18 @@ describe("model providers", () => {
     const blocked = await call("/api/providers/openai", { method: "DELETE" });
     expect(blocked.status).toBe(409);
     expect(await blocked.json()).toMatchObject({ error: expect.stringContaining("coder role") });
+  });
+
+  it("detects the API type when the owner leaves it out", async () => {
+    const call = makeApp();
+    const claude = await call("/api/providers", json({ name: "Claude", baseUrl: "https://api.anthropic.com", apiKey: "sk-ant-abcdefghijkl0001" }));
+    expect(await claude.json()).toMatchObject({ id: "claude", type: "anthropic" });
+    // The test app's fetch answers with a model list, so an unknown address is OpenAI-compatible.
+    const gateway = await call("/api/providers", json({ name: "My Gateway", baseUrl: "https://llm.example.com/v1" }));
+    expect(await gateway.json()).toMatchObject({ id: "my-gateway", type: "openai" });
+    const moved = await call("/api/providers/my-gateway", { ...json({ name: "My Gateway", baseUrl: "https://api.minimax.io/anthropic" }), method: "PATCH" });
+    expect(await moved.json()).toMatchObject({ type: "anthropic", baseUrl: "https://api.minimax.io/anthropic" });
+    expect((await call("/api/providers", json({ name: "Bad", baseUrl: "ftp://example.com" }))).status).toBe(400);
   });
 
   it("lists a provider's models and prices every model in use", async () => {

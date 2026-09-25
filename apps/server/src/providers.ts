@@ -27,6 +27,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   { id: "cheaperinference", name: "CheaperInference", type: "openai", baseUrl: "https://api.cheaperinference.com/v1" },
   { id: "groq", name: "Groq", type: "openai", baseUrl: "https://api.groq.com/openai/v1" },
   { id: "mistral", name: "Mistral", type: "openai", baseUrl: "https://api.mistral.ai/v1" },
+  { id: "nvidia", name: "NVIDIA", type: "openai", baseUrl: "https://integrate.api.nvidia.com/v1" },
   { id: "xai", name: "xAI", type: "openai", baseUrl: "https://api.x.ai/v1" },
   { id: "together", name: "Together AI", type: "openai", baseUrl: "https://api.together.xyz/v1" },
   { id: "ollama", name: "Ollama (on this server)", type: "openai", baseUrl: "http://127.0.0.1:11434/v1" },
@@ -96,7 +97,11 @@ export function catalogPrice(entry: { pricing?: unknown }): Pricing | null {
 }
 
 /** Lists a provider's models: `GET /models` for OpenAI-style APIs, `GET /v1/models` for Anthropic. */
-export async function fetchModelCatalog(provider: Pick<GatewayProvider, "type" | "baseUrl" | "apiKey">, fetchImpl: typeof fetch = fetch): Promise<CatalogModel[]> {
+export async function fetchModelCatalog(
+  provider: Pick<GatewayProvider, "type" | "baseUrl" | "apiKey">,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 20_000,
+): Promise<CatalogModel[]> {
   const anthropic = provider.type === "anthropic";
   const url = anthropic ? `${provider.baseUrl}/v1/models?limit=1000` : `${provider.baseUrl}/models`;
   const headers: Record<string, string> = anthropic
@@ -104,7 +109,7 @@ export async function fetchModelCatalog(provider: Pick<GatewayProvider, "type" |
     : provider.apiKey
       ? { authorization: `Bearer ${provider.apiKey}` }
       : {};
-  const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(20_000) });
+  const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) {
     const detail = (await res.text().catch(() => "")).slice(0, 200).replace(/\s+/g, " ");
     throw new Error(`The provider answered HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
@@ -119,6 +124,34 @@ export async function fetchModelCatalog(provider: Pick<GatewayProvider, "type" |
     if (id) models.push({ id, price: catalogPrice(entry as { pricing?: unknown }) });
   }
   return models.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** The API type an address names on its own: Anthropic and Gemini hosts, gateways' `/anthropic` routes, and the presets. */
+export function typeFromUrl(baseUrl: string): ProviderType | null {
+  const url = new URL(baseUrl);
+  if (url.hostname === "api.anthropic.com" || /(^|\/)anthropic(\/v1)?\/?$/i.test(url.pathname)) return "anthropic";
+  if (url.hostname === "generativelanguage.googleapis.com") return "gemini";
+  if (PROVIDER_PRESETS.some((preset) => preset.type === "openai" && new URL(preset.baseUrl).host === url.host)) return "openai";
+  return null;
+}
+
+/**
+ * Works out the API type so the owner never picks it: from the address when it says, else by asking the API for its
+ * models the OpenAI way and then the Anthropic way. An API that answers neither is taken as OpenAI-compatible.
+ */
+export async function detectProviderType(baseUrl: string, apiKey: string | null, fetchImpl: typeof fetch = fetch): Promise<ProviderType> {
+  const normalized = normalizeBaseUrl(baseUrl);
+  const known = typeFromUrl(normalized);
+  if (known) return known;
+  for (const type of ["openai", "anthropic"] as const) {
+    try {
+      await fetchModelCatalog({ type, baseUrl: normalized, apiKey }, fetchImpl, 8_000);
+      return type;
+    } catch {
+      // not this dialect (or not reachable); try the next one
+    }
+  }
+  return "openai";
 }
 
 const CATALOG_MS = 60 * 60_000;
@@ -189,6 +222,10 @@ export class ProviderRegistry {
     const key = apiKey.trim();
     this.brain.setProviderKey(id, this.keys.encrypt(key), keyLast4(key));
     this.catalogs.delete(id);
+  }
+
+  detectType(baseUrl: string, apiKey: string | null): Promise<ProviderType> {
+    return detectProviderType(baseUrl, apiKey, this.fetchImpl);
   }
 
   /** What still uses a provider, in words for an error message. */

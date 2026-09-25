@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Brain } from "@ai-employee/brain";
 import { KeyStore } from "./keystore.ts";
-import { catalogPrice, fetchModelCatalog, isLocalProvider, modelsInUse, normalizeBaseUrl, providerIdFrom, ProviderRegistry } from "./providers.ts";
+import { catalogPrice, detectProviderType, fetchModelCatalog, isLocalProvider, modelsInUse, normalizeBaseUrl, providerIdFrom, ProviderRegistry, typeFromUrl } from "./providers.ts";
 
 let brain: Brain;
 beforeEach(() => {
@@ -56,6 +56,36 @@ describe("provider helpers", () => {
 
     const failing = (async () => new Response("invalid key", { status: 401 })) as typeof fetch;
     await expect(fetchModelCatalog({ type: "openai", baseUrl: "https://api.example.com/v1", apiKey: "bad" }, failing)).rejects.toThrow(/HTTP 401: invalid key/);
+  });
+});
+
+describe("API type detection", () => {
+  it("reads the type from well-known addresses", () => {
+    expect(typeFromUrl("https://api.anthropic.com")).toBe("anthropic");
+    expect(typeFromUrl("https://api.minimax.io/anthropic")).toBe("anthropic");
+    expect(typeFromUrl("https://open.bigmodel.cn/api/anthropic/v1")).toBe("anthropic");
+    expect(typeFromUrl("https://generativelanguage.googleapis.com/v1beta/openai")).toBe("gemini");
+    expect(typeFromUrl("https://integrate.api.nvidia.com/v1")).toBe("openai");
+    expect(typeFromUrl("http://127.0.0.1:11434/v1")).toBe("openai");
+    expect(typeFromUrl("https://llm.example.com/v1")).toBeNull();
+  });
+
+  it("asks an unknown API for its models the OpenAI way, then the Anthropic way", async () => {
+    const seen: string[] = [];
+    const answering = (okWhen: string | null) =>
+      (async (url: string | URL) => {
+        seen.push(String(url));
+        return okWhen && String(url).includes(okWhen) ? Response.json({ data: [{ id: "m" }] }) : new Response("not here", { status: 404 });
+      }) as typeof fetch;
+
+    expect(await detectProviderType("https://llm.example.com/v1", "k", answering("/v1/models"))).toBe("openai");
+    expect(await detectProviderType("https://claude-proxy.example.com", "k", answering("/v1/models?limit"))).toBe("anthropic");
+    expect(seen).toEqual(["https://llm.example.com/v1/models", "https://claude-proxy.example.com/models", "https://claude-proxy.example.com/v1/models?limit=1000"]);
+    expect(await detectProviderType("https://quiet.example.com/v1", null, answering(null))).toBe("openai");
+    seen.length = 0;
+    expect(await detectProviderType("https://api.anthropic.com/", "k", answering(null))).toBe("anthropic");
+    expect(seen).toEqual([]);
+    await expect(detectProviderType("ftp://example.com", null, answering(null))).rejects.toThrow(/https:\/\/ or http:\/\//);
   });
 });
 

@@ -152,9 +152,11 @@ function ProviderRow({ provider, onEdit }: { provider: Provider; onEdit: () => v
   );
 }
 
+/** The "Start from" choice that clears the form for an API without a preset. */
+const OTHER_PROVIDER = "other";
+
 function ProviderForm({ provider, presets, onDone }: { provider?: Provider; presets: ProviderPreset[]; onDone: () => void }) {
   const [name, setName] = useState(provider?.name ?? "");
-  const [type, setType] = useState<ProviderType>(provider?.type ?? "openai");
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
   const [removeKey, setRemoveKey] = useState(false);
@@ -162,18 +164,17 @@ function ProviderForm({ provider, presets, onDone }: { provider?: Provider; pres
 
   const applyPreset = (id: string) => {
     const preset = presets.find((p) => p.id === id);
-    if (!preset) return;
-    setName(preset.name);
-    setType(preset.type);
-    setBaseUrl(preset.baseUrl);
+    setName(preset?.name ?? "");
+    setBaseUrl(preset?.baseUrl ?? "");
   };
 
+  // The server detects the API type (OpenAI-compatible, Anthropic or Gemini) from the address and the key.
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const key = apiKey.trim();
     const ok = await save.run(async () => {
-      if (provider) await api.updateProvider(provider.id, { name, type, baseUrl, ...(removeKey ? { apiKey: null } : key ? { apiKey: key } : {}) });
-      else await api.createProvider({ name, type, baseUrl, ...(key ? { apiKey: key } : {}) });
+      if (provider) await api.updateProvider(provider.id, { name, baseUrl, ...(removeKey ? { apiKey: null } : key ? { apiKey: key } : {}) });
+      else await api.createProvider({ name, baseUrl, ...(key ? { apiKey: key } : {}) });
     });
     if (ok) onDone();
   };
@@ -183,7 +184,7 @@ function ProviderForm({ provider, presets, onDone }: { provider?: Provider; pres
       {!provider && (
         <label className="field field-wide">
           Start from
-          <span className="field-hint">Fills in the name, API type and base URL. You can change them.</span>
+          <span className="field-hint">Fills in the name and base URL. For an API that is not listed, choose Other API and enter its base URL.</span>
           <select defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
             <option value="">Choose a provider…</option>
             {presets.map((preset) => (
@@ -191,24 +192,19 @@ function ProviderForm({ provider, presets, onDone }: { provider?: Provider; pres
                 {preset.name}
               </option>
             ))}
+            <option value={OTHER_PROVIDER}>Other API (OpenAI-compatible, Anthropic-compatible or Gemini)</option>
           </select>
         </label>
       )}
-      <label className="field">
+      <label className="field field-wide">
         Name
         <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={60} />
       </label>
-      <label className="field">
-        API type
-        <select value={type} onChange={(e) => setType(e.target.value as ProviderType)}>
-          <option value="openai">OpenAI-compatible</option>
-          <option value="anthropic">Anthropic Messages</option>
-          <option value="gemini">Google Gemini</option>
-        </select>
-      </label>
       <label className="field field-wide">
         Base URL
-        <span className="field-hint">For example https://api.openai.com/v1, or http://127.0.0.1:11434/v1 for Ollama on this server.</span>
+        <span className="field-hint">
+          For example https://api.openai.com/v1, or http://127.0.0.1:11434/v1 for Ollama on this server. The API type is detected from the address and the key when you save.
+        </span>
         <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} required inputMode="url" spellCheck={false} />
       </label>
       <label className="field field-wide">
