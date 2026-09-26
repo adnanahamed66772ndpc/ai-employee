@@ -22,16 +22,30 @@ export interface TriageResult {
   intent?: string;
 }
 
+/** What the security scorer sees: the changed files and the diff — the same material a critic model already gets. */
+export interface SecurityInput {
+  files: string[];
+  diff: string;
+}
+
 export interface TriageScorer {
   /**
    * Rejects on abort (the outer task was cancelled) or on any transport/parse error. The pipeline treats a non-abort
    * rejection as "no signal" and keeps the default model, so an implementation may throw freely.
    */
   score(input: TriageInput, signal?: AbortSignal): Promise<TriageResult>;
+  /**
+   * Optional: how security-sensitive a diff is, in [0,1]. Used only to ADD the security critic when the deterministic
+   * file/keyword router missed it — never to remove it. Same rejection contract as `score`.
+   */
+  securityScore?(input: SecurityInput, signal?: AbortSignal): Promise<number>;
 }
 
 /** A task at or above this complexity starts on the stronger model; below it keeps the cheap default. */
 export const HIGH_COMPLEXITY = 0.66;
+
+/** A change at or above this security score gets the security critic even when the file/keyword router did not ask for it. */
+export const SECURITY_ROUTING_THRESHOLD = 0.6;
 
 export interface ModelChoice {
   model: ModelRef;
@@ -95,6 +109,15 @@ export class JevScorer implements TriageScorer {
   }
 
   async score(input: TriageInput, signal?: AbortSignal): Promise<TriageResult> {
+    return parseResult(await this.post(buildBody(input), signal));
+  }
+
+  async securityScore(input: SecurityInput, signal?: AbortSignal): Promise<number> {
+    return scoreFrom(await this.post(buildSecurityBody(input), signal), "security");
+  }
+
+  /** One System One call, bounded by a timeout and cancellable by the caller's signal. Throws on a non-2xx response. */
+  private async post(body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController();
     const onAbort = () => controller.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -103,12 +126,11 @@ export class JevScorer implements TriageScorer {
       const response = await this.fetchImpl(this.url, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify(buildBody(input)),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       if (!response.ok) throw new Error(`Jev returned ${response.status}`);
-      const data: unknown = await response.json();
-      return parseResult(data);
+      return await response.json();
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
@@ -137,18 +159,43 @@ export function buildBody(input: TriageInput): Record<string, unknown> {
   };
 }
 
+/** The bounded, non-sensitive state and the one security-sensitivity question. The diff is what a critic model already sees. */
+export function buildSecurityBody(input: SecurityInput): Record<string, unknown> {
+  return {
+    state: {
+      files: input.files.slice(0, 200).join("\n"),
+      diff: input.diff.slice(0, 40_000),
+    },
+    questions: {
+      security: {
+        type: "score",
+        description:
+          "How security-sensitive is this code change, from 0 (no security impact) to 1 (touches authentication, authorization, secrets, user input handling, SQL, shell, file paths, crypto, cookies/CORS/CSRF or similar)?",
+      },
+    },
+  };
+}
+
 /**
  * Reads a complexity in [0,1] and an optional intent label out of Jev's answer, tolerating the shapes a score/choice
- * response is likely to take (a bare number, `{value}`, `{score}`, `{probability}`, or an `answers`/`data` wrapper).
- * Throws when no usable number is present, which the caller treats as "no signal".
+ * response is likely to take. Throws when no usable number is present, which the caller treats as "no signal".
  */
 export function parseResult(data: unknown): TriageResult {
+  const complexity = scoreFrom(data, "complexity");
+  const intent = readString(asRecord(asRecord(data)?.answers)?.intent ?? asRecord(asRecord(data)?.data)?.intent ?? asRecord(data)?.intent);
+  return intent ? { complexity, intent } : { complexity };
+}
+
+/**
+ * Pulls a named score in [0,1] out of Jev's answer, tolerating the shapes a score response is likely to take (a bare
+ * number, `{value}`, `{score}`, `{probability}`, or an `answers`/`data` wrapper). Throws when none is present.
+ */
+export function scoreFrom(data: unknown, key: string): number {
   const root = asRecord(data);
   const answers = asRecord(root?.answers) ?? asRecord(root?.data) ?? root;
-  const complexity = readNumber(answers?.complexity) ?? (typeof root?.complexity === "number" ? root.complexity : undefined) ?? readNumber(answers?.score);
-  if (complexity === undefined) throw new Error("Jev answer had no complexity score");
-  const intent = readString(answers?.intent);
-  return intent ? { complexity, intent } : { complexity };
+  const n = readNumber(answers?.[key]) ?? (typeof root?.[key] === "number" ? root[key] : undefined) ?? readNumber(answers?.score);
+  if (n === undefined) throw new Error(`Jev answer had no ${key} score`);
+  return n;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

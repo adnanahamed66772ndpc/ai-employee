@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildBody, chooseCoderModel, JevScorer, parseResult, type TriageResult } from "./triage.ts";
+import { buildBody, buildSecurityBody, chooseCoderModel, JevScorer, parseResult, scoreFrom, type TriageResult } from "./triage.ts";
 import type { ModelRef } from "./spending.ts";
 
 const cheap: ModelRef = { provider: "cheaperinference", model: "deepseek-v4-flash" };
@@ -89,5 +89,40 @@ describe("JevScorer", () => {
     const pending = scorer.score({ prompt: "p", planSummary: "s" }, controller.signal);
     controller.abort();
     await expect(pending).rejects.toThrow();
+  });
+});
+
+describe("buildSecurityBody", () => {
+  it("sends the files and a bounded diff with a single security question", () => {
+    const body = buildSecurityBody({ files: ["a.ts", "b.ts"], diff: "x".repeat(50_000) });
+    const state = body.state as { files: string; diff: string };
+    expect(state.files).toBe("a.ts\nb.ts");
+    expect(state.diff.length).toBe(40_000);
+    expect(Object.keys(body.questions as object)).toEqual(["security"]);
+  });
+});
+
+describe("scoreFrom", () => {
+  it("reads a named score from the shapes a score answer can take", () => {
+    expect(scoreFrom({ security: 0.9 }, "security")).toBe(0.9);
+    expect(scoreFrom({ answers: { security: { value: 0.4 } } }, "security")).toBe(0.4);
+    expect(scoreFrom({ data: { security: { probability: 0.7 } } }, "security")).toBe(0.7);
+    expect(() => scoreFrom({ answers: {} }, "security")).toThrow();
+  });
+});
+
+describe("JevScorer.securityScore", () => {
+  it("posts with a bearer key and returns the security score", async () => {
+    const fetchImpl = vi.fn(async (_u: string | URL, _i?: RequestInit) => jsonResponse({ security: 0.82 }));
+    const scorer = new JevScorer({ apiKey: "k", baseUrl: "https://jev.example", path: "/s", fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(scorer.securityScore({ files: ["auth.ts"], diff: "+ token" })).resolves.toBe(0.82);
+    const [, init] = fetchImpl.mock.calls[0]!;
+    expect(init?.headers).toMatchObject({ authorization: "Bearer k" });
+  });
+
+  it("throws on a non-2xx response so the caller adds nothing", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({}, false, 502));
+    const scorer = new JevScorer({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(scorer.securityScore({ files: ["a.ts"], diff: "d" })).rejects.toThrow(/502/);
   });
 });
