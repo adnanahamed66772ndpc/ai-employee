@@ -10,6 +10,7 @@ import { dayStamp } from "./handoff.ts";
 import { McpTokens } from "./mcp.ts";
 import { packageInfo, type PackageLookup } from "./packages.ts";
 import { Orchestrator, type AgentHandle, type OrchestratorOptions } from "./pipeline.ts";
+import type { TriageScorer } from "./triage.ts";
 import type { VisualTools } from "./visual.ts";
 import { addHandoffTemplate } from "./projects.ts";
 
@@ -646,6 +647,55 @@ it("gives the Coder one more try with the stronger model when the review rounds 
     ["deepseek-v4-pro", "escalation"],
   ]);
   expect(agent.prompts.find((p) => p.text.includes("A cheaper model already tried"))?.text).toContain("Totals must show two decimals");
+});
+
+it("starts a hard task on the stronger model (triage) and does not escalate again", async () => {
+  brain.setAppSetting("escalationModel", "deepseek-v4-pro");
+  const project = brain.createProject({ name: "Shop", localPath: repo });
+  const agent = new FakeAgent((text, cwd) => {
+    if (text.startsWith("You are the Planner")) return said('```json\n{"summary": "A hard, risky change"}\n```');
+    if (text.startsWith("You are the Coder")) {
+      writeFileSync(join(cwd, "hard.txt"), "done\n");
+      return said("Done.");
+    }
+    if (text.startsWith("You are the Reviewer")) return said('```json\n{"approve": true, "summary": "Fine", "issues": []}\n```');
+    const reply = afterCritics(text);
+    if (reply) return reply;
+    throw new Error(`unexpected prompt: ${text.slice(0, 60)}`);
+  });
+  const triage: TriageScorer = { score: async () => ({ complexity: 0.9, intent: "security" }) };
+  startOrchestrator(agent, 1, { triage });
+  const task = brain.createTask(brain.createSession(project.id, "Hard").id, "A hard, risky change");
+
+  expect(await untilStatus(task.id, ["awaiting_approval", "failed", "needs_human"])).toMatchObject({ status: "awaiting_approval", error: null });
+  const events = brain.listEvents(task.id);
+  expect(events.find((e) => e.type === "triage")?.payload).toMatchObject({ model: "cheaperinference/deepseek-v4-pro", routed: true, intent: "security", complexity: 0.9 });
+  // Already on the stronger model, so the after-rounds escalation must not fire.
+  expect(events.some((e) => e.type === "escalated")).toBe(false);
+  expect(brain.listRuns(task.id).filter((r) => r.role === "coder").map((r) => [r.model, r.purpose])).toEqual([["deepseek-v4-pro", "triage"]]);
+});
+
+it("keeps the cheap model for an easy task (triage)", async () => {
+  brain.setAppSetting("escalationModel", "deepseek-v4-pro");
+  const project = brain.createProject({ name: "Shop", localPath: repo });
+  const agent = new FakeAgent((text, cwd) => {
+    if (text.startsWith("You are the Planner")) return said('```json\n{"summary": "An easy change"}\n```');
+    if (text.startsWith("You are the Coder")) {
+      writeFileSync(join(cwd, "easy.txt"), "ok\n");
+      return said("Done.");
+    }
+    if (text.startsWith("You are the Reviewer")) return said('```json\n{"approve": true, "summary": "Fine", "issues": []}\n```');
+    const reply = afterCritics(text);
+    if (reply) return reply;
+    throw new Error(`unexpected prompt: ${text.slice(0, 60)}`);
+  });
+  const triage: TriageScorer = { score: async () => ({ complexity: 0.2 }) };
+  startOrchestrator(agent, 1, { triage });
+  const task = brain.createTask(brain.createSession(project.id, "Easy").id, "An easy change");
+
+  expect(await untilStatus(task.id, ["awaiting_approval", "failed", "needs_human"])).toMatchObject({ status: "awaiting_approval", error: null });
+  expect(brain.listEvents(task.id).find((e) => e.type === "triage")?.payload).toMatchObject({ model: "cheaperinference/deepseek-v4-flash", routed: false });
+  expect(brain.listRuns(task.id).filter((r) => r.role === "coder").map((r) => [r.model, r.purpose])).toEqual([["deepseek-v4-flash", null]]);
 });
 
 it("stops every task once all model calls today reach the daily budget, and starts waiting tasks when it is raised", async () => {

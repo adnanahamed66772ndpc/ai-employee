@@ -19,6 +19,7 @@ import { TelegramNotifier, watchForNotifications } from "./notify.ts";
 import { NpmRegistry } from "./packages.ts";
 import { Orchestrator } from "./pipeline.ts";
 import { ProviderRegistry } from "./providers.ts";
+import { JevScorer, type TriageScorer } from "./triage.ts";
 import { prepareProjectsDir, processInGroup } from "./workspace.ts";
 
 const log = (message: string) => console.log(`${new Date().toLocaleTimeString()} ${message}`);
@@ -84,6 +85,13 @@ try {
   log(`warning: the visual check is off, its browser tools could not be prepared: ${(error as Error).message}`);
 }
 
+// Task triage (Jev): a hard task starts on the escalation model. Off unless a key is set; failures keep the default.
+let triage: TriageScorer | undefined;
+if (config.jevApiKey) {
+  triage = new JevScorer({ apiKey: config.jevApiKey, baseUrl: config.jevBaseUrl, log });
+  log("task triage is on (Jev): hard tasks start on the escalation model");
+}
+
 const orchestrator = new Orchestrator({
   brain,
   pool,
@@ -97,6 +105,7 @@ const orchestrator = new Orchestrator({
   maxParallelTasks: config.maxParallelTasks,
   visual,
   packages: new NpmRegistry(),
+  triage,
   stopLeftovers:
     config.agentUser && config.checkRunner
       ? () =>
