@@ -37,6 +37,10 @@ export interface Config {
   telegramChatId: string | undefined;
   /** Chrome for the visual check; unset lets Playwright look for an installed Chrome. */
   chromePath: string | undefined;
+  /** TypeSafe AI (Jev) key for task triage; unset turns triage off and the pipeline runs exactly as before. */
+  jevApiKey: string | undefined;
+  /** Jev API base URL; unset uses the client's built-in default. */
+  jevBaseUrl: string | undefined;
 }
 
 export function loadConfig(): Config {
@@ -72,6 +76,8 @@ export function loadConfig(): Config {
     telegramBotToken: process.env.AI_EMPLOYEE_TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: process.env.AI_EMPLOYEE_TELEGRAM_CHAT_ID || undefined,
     chromePath: process.env.AI_EMPLOYEE_CHROME || ["/usr/bin/google-chrome", "/usr/bin/chromium"].find((p) => existsSync(p)),
+    jevApiKey: process.env.AI_EMPLOYEE_JEV_API_KEY || undefined,
+    jevBaseUrl: process.env.AI_EMPLOYEE_JEV_BASE_URL || undefined,
   };
 }
 

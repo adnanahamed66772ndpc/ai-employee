@@ -32,6 +32,7 @@ import {
   type QuickFinding,
 } from "./quickChecks.ts";
 import { dailyBudgetMessage, nextDay, sameModel, spendingSettings, todaySpend, type ModelRef } from "./spending.ts";
+import { chooseCoderModel, type TriageScorer } from "./triage.ts";
 import { appCommand, captureFindings, freePort, type CaptureResult, type VisualTools } from "./visual.ts";
 import { decidePermission, permissionResponse } from "./policy.ts";
 import * as prompts from "./prompts.ts";
@@ -99,6 +100,11 @@ export interface OrchestratorOptions {
    * task runs, before the next one starts; unset without an agent user.
    */
   stopLeftovers?: () => Promise<number>;
+  /**
+   * Rates task difficulty before the Coder starts, so a hard task can begin on the stronger model (see triage.ts);
+   * unset (no Jev key) leaves model choice exactly as before. Advisory: any failure keeps the default model.
+   */
+  triage?: TriageScorer;
 }
 
 export interface AgentSession {
@@ -522,8 +528,42 @@ export class Orchestrator {
     this.brain.updateTask(task.id, { status: "coding", plan });
     this.brain.addEvent(task.id, "plan_ready", { plan });
 
+    // 2b. Triage: a hard task starts on the stronger model instead of failing cheap rounds first (no-op without a scorer).
+    const coderModel = await this.triageModel(task, plan, running);
+
     const context: BuildContext = { worktree, branch, base, diffBase, plan, memories, epic, versions };
-    await this.buildAndCommit(task, project, running, context, prompts.coder(project, task, plan, memories, branch, versions));
+    await this.buildAndCommit(task, project, running, context, prompts.coder(project, task, plan, memories, branch, versions), coderModel);
+  }
+
+  /**
+   * Asks the triage scorer how hard the task is and, for a hard task, returns the stronger model for the Coder's first
+   * session. Returns undefined — keep the Coder's default model — when triage is off, there is no distinct stronger
+   * model, or the scorer gives no usable answer. Only the outer task's cancellation propagates.
+   */
+  private async triageModel(task: Task, plan: prompts.Plan, running: RunningTask): Promise<ModelRef | undefined> {
+    const scorer = this.options.triage;
+    if (!scorer) return undefined;
+    const strong = spendingSettings(this.brain).escalationModel;
+    const coderSetting = this.brain.getRoleSetting("coder");
+    const cheap: ModelRef = { provider: coderSetting.provider, model: coderSetting.model };
+    if (!strong || sameModel(strong, cheap)) return undefined;
+    try {
+      const result = await scorer.score({ prompt: task.prompt, planSummary: prompts.truncate(plan.summary ?? "", 4_000) }, running.abort.signal);
+      const choice = chooseCoderModel(result, cheap, strong);
+      const routed = !sameModel(choice.model, cheap);
+      this.brain.addEvent(task.id, "triage", {
+        complexity: Math.min(1, Math.max(0, Number.isFinite(result.complexity) ? result.complexity : 0)),
+        intent: result.intent ?? null,
+        model: `${choice.model.provider}/${choice.model.model}`,
+        reason: choice.reason,
+        routed,
+      });
+      return routed ? choice.model : undefined;
+    } catch (error) {
+      if (running.abort.signal.aborted) throw new CancelledError();
+      this.brain.addEvent(task.id, "triage_skipped", { message: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    }
   }
 
   /**
@@ -580,23 +620,25 @@ export class Orchestrator {
    * Coder ⇄ checks ⇄ Reviewer, the critics' final round, handoff notes, the commit, and the push approval (or the epic
    * branch). `firstPrompt` starts the Coder: the task itself, or a continuation of stopped work.
    */
-  private async buildAndCommit(task: Task, project: Project, running: RunningTask, context: BuildContext, firstPrompt: string): Promise<void> {
+  private async buildAndCommit(task: Task, project: Project, running: RunningTask, context: BuildContext, firstPrompt: string, firstModel?: ModelRef): Promise<void> {
     const { worktree, branch, plan, memories } = context;
     const signal = running.abort.signal;
     const cwd = worktree.path;
 
-    // 3. Coder ⇄ checks ⇄ Reviewer (the logic and backend critic), then the specialist critics' final round
+    // 3. Coder ⇄ checks ⇄ Reviewer (the logic and backend critic), then the specialist critics' final round.
+    // `firstModel` (set by triage for a hard task) starts the Coder on the stronger model; otherwise the role default.
     const feedbackLog: string[] = [];
-    let outcome = await this.codeAndReview(task, project, running, context, firstPrompt, { firstRound: 1, rounds: MAX_ROUNDS }, feedbackLog);
+    let outcome = await this.codeAndReview(task, project, running, context, firstPrompt, { firstRound: 1, rounds: MAX_ROUNDS, model: firstModel, purpose: firstModel ? "triage" : undefined }, feedbackLog);
 
     // One more try with a stronger model, in a fresh session that gets a summary instead of the failed rounds' context.
+    // Compare against the model actually used first, so a task already routed to the stronger model does not re-escalate.
     const stronger = spendingSettings(this.brain).escalationModel;
     const coderSetting = this.brain.getRoleSetting("coder");
-    const coderModel: ModelRef = { provider: coderSetting.provider, model: coderSetting.model };
+    const firstUsed: ModelRef = firstModel ?? { provider: coderSetting.provider, model: coderSetting.model };
     const label = (ref: ModelRef) => `${ref.provider}/${ref.model}`;
     let escalated = false;
-    if (!(outcome.approved && outcome.critics?.passed) && stronger && !sameModel(stronger, coderModel)) {
-      this.brain.addEvent(task.id, "escalated", { from: label(coderModel), to: label(stronger), reason: outcome.approved ? "critics" : "review" });
+    if (!(outcome.approved && outcome.critics?.passed) && stronger && !sameModel(stronger, firstUsed)) {
+      this.brain.addEvent(task.id, "escalated", { from: label(firstUsed), to: label(stronger), reason: outcome.approved ? "critics" : "review" });
       const prompt = prompts.coderEscalate(project, task, plan, memories, branch, feedbackLog.at(-1) ?? "", context.versions);
       try {
         outcome = await this.codeAndReview(task, project, running, context, prompt, { firstRound: outcome.lastRound + 1, rounds: ESCALATION_ROUNDS, model: stronger }, feedbackLog);
@@ -630,7 +672,7 @@ export class Orchestrator {
     running: RunningTask,
     context: BuildContext,
     firstPrompt: string,
-    options: { firstRound: number; rounds: number; model?: ModelRef },
+    options: { firstRound: number; rounds: number; model?: ModelRef; purpose?: string },
     feedbackLog: string[],
   ): Promise<CodingOutcome> {
     const { worktree, diffBase, plan } = context;
@@ -641,7 +683,7 @@ export class Orchestrator {
     let checksReport = "";
     let critics: CriticOutcome | null = null;
     let lastRound = options.firstRound - 1;
-    const coderSession = await this.openSession(task, project, cwd, "coder", "workspace-write", running, options.model ? "escalation" : undefined, options.model);
+    const coderSession = await this.openSession(task, project, cwd, "coder", "workspace-write", running, options.model ? (options.purpose ?? "escalation") : undefined, options.model);
     try {
       let feedback: string | null = null;
       for (let round = options.firstRound; round < options.firstRound + options.rounds && !approved; round++) {
@@ -1391,7 +1433,8 @@ export class Orchestrator {
         },
       );
       sessionId = opened.sessionId;
-      await agent.selectModel(opened, setting.provider, model, setting.reasoningEffort);
+      // Use the resolved provider (an override may point at another provider), not just the role setting's.
+      await agent.selectModel(opened, provider, model, setting.reasoningEffort);
     } catch (error) {
       this.tokens.revoke(token);
       this.brain.finishRun(run.id, "failed");
