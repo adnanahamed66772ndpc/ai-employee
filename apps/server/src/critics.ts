@@ -83,9 +83,14 @@ export interface CriticPlan {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
+/** Changed files a critic could care about: the team's notes, docs, lockfiles, build output and assets are dropped. */
+export function relevantFiles(files: string[]): string[] {
+  return files.filter((file) => !IGNORED.test(file));
+}
+
 /** Which critics this change needs, and the files each one should look at. */
 export function planCritics(files: string[], diff: string, disabled: readonly CriticKind[] = []): CriticPlan[] {
-  const relevant = files.filter((file) => !IGNORED.test(file));
+  const relevant = relevantFiles(files);
   const added = addedLinesByFile(diff);
   const plans: CriticPlan[] = [];
 

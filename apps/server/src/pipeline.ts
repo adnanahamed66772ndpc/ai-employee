@@ -4,7 +4,7 @@ import type { Approval, Brain, CriticKind, Epic, Memory, MemoryKind, Project, Ro
 import type { DshAgent, PermissionMode, RequestPermissionRequest, RequestPermissionResponse, SessionUpdate } from "@ai-employee/dsh-client";
 import * as git from "@ai-employee/git";
 import { runCapture, runShellCommand } from "./checks.ts";
-import { blockingFindings, CRITIC_INFO, planCritics, type CriticFinding, type CriticPlan, type CriticVerdict } from "./critics.ts";
+import { blockingFindings, CRITIC_INFO, planCritics, relevantFiles, type CriticFinding, type CriticPlan, type CriticVerdict } from "./critics.ts";
 import { AI_DIR, AI_FILES, dayStamp, parseHandoffReply, planHandoffWrite, templateFiles, type AiFiles, type FileOp } from "./handoff.ts";
 import type { McpTokens } from "./mcp.ts";
 import {
@@ -32,7 +32,7 @@ import {
   type QuickFinding,
 } from "./quickChecks.ts";
 import { dailyBudgetMessage, nextDay, sameModel, spendingSettings, todaySpend, type ModelRef } from "./spending.ts";
-import { chooseCoderModel, type TriageScorer } from "./triage.ts";
+import { chooseCoderModel, SECURITY_ROUTING_THRESHOLD, type TriageScorer } from "./triage.ts";
 import { appCommand, captureFindings, freePort, type CaptureResult, type VisualTools } from "./visual.ts";
 import { decidePermission, permissionResponse } from "./policy.ts";
 import * as prompts from "./prompts.ts";
@@ -816,7 +816,14 @@ export class Orchestrator {
     };
 
     const first = await changes();
-    let pending = planCritics(first.files, first.diff, project.disabledCritics);
+    // Ask Jev once whether this change is security-sensitive when the file/keyword router did not already ask for the
+    // security critic. `withSecurity` then folds that one decision into the first plan and every re-check re-plan, so a
+    // Jev-added security critic that finds a blocker is still re-checked after the fix. Jev only adds, never removes.
+    const firstPlan = planCritics(first.files, first.diff, project.disabledCritics);
+    const securityAdd = firstPlan.some((p) => p.kind === "security") ? null : await this.securityRoutingPlan(task, first, project, running);
+    const withSecurity = (plans: CriticPlan[]) => (securityAdd && !plans.some((p) => p.kind === "security") ? [...plans, securityAdd] : plans);
+
+    let pending = withSecurity(firstPlan);
     if (pending.length === 0) {
       // Tell apart "nothing to check" from "the owner turned the needed critic off", so the log never overstates safety.
       const turnedOff = planCritics(first.files, first.diff).map((p) => p.kind);
@@ -888,8 +895,37 @@ export class Orchestrator {
       }
 
       const failed = new Set(failing.map((f) => f.critic.kind));
-      pending = (await planFor()).filter((p) => failed.has(p.kind) || !ran.has(p.kind));
+      pending = withSecurity(await planFor()).filter((p) => failed.has(p.kind) || !ran.has(p.kind));
       if (pending.length === 0) return { passed: true, feedback, checksReport: latestChecks };
+    }
+  }
+
+  /**
+   * Jev's optional security-critic routing: score how security-sensitive the change is, and return a security
+   * `CriticPlan` over the changed files when it clears the threshold. Returns null (add nothing) when triage has no
+   * security scorer, the security critic is off for the project, there are no relevant files, the score is below the
+   * threshold, or the scorer fails. Called only when the file/keyword router did not already ask for the security critic.
+   */
+  private async securityRoutingPlan(
+    task: Task,
+    change: { files: string[]; diff: string },
+    project: Project,
+    running: RunningTask,
+  ): Promise<CriticPlan | null> {
+    const scorer = this.options.triage;
+    if (!scorer?.securityScore || project.disabledCritics.includes("security")) return null;
+    const files = relevantFiles(change.files);
+    if (files.length === 0) return null;
+    try {
+      const raw = await scorer.securityScore({ files, diff: change.diff }, running.abort.signal);
+      const score = Math.min(1, Math.max(0, Number.isFinite(raw) ? raw : 0));
+      const added = score >= SECURITY_ROUTING_THRESHOLD;
+      this.brain.addEvent(task.id, "security_routing", { score, added });
+      return added ? { kind: "security", files, reason: `Jev security score ${score.toFixed(2)}` } : null;
+    } catch (error) {
+      if (running.abort.signal.aborted) throw new CancelledError();
+      this.brain.addEvent(task.id, "security_routing_skipped", { message: error instanceof Error ? error.message : String(error) });
+      return null;
     }
   }
 

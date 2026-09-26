@@ -698,6 +698,57 @@ it("keeps the cheap model for an easy task (triage)", async () => {
   expect(brain.listRuns(task.id).filter((r) => r.role === "coder").map((r) => [r.model, r.purpose])).toEqual([["deepseek-v4-flash", null]]);
 });
 
+it("runs the security critic when Jev scores a change security-sensitive that the file/keyword router missed", async () => {
+  const project = brain.createProject({ name: "Shop", localPath: repo });
+  const agent = new FakeAgent((text, cwd) => {
+    if (text.startsWith("You are the Planner")) return said('```json\n{"summary": "Tweak a helper"}\n```');
+    if (text.startsWith("You are the Coder")) {
+      mkdirSync(join(cwd, "src", "util"), { recursive: true });
+      writeFileSync(join(cwd, "src", "util", "format.ts"), "export const f = (x: number) => x + 1;\n");
+      return said("Added a helper.");
+    }
+    if (text.startsWith("You are the Reviewer")) return said('```json\n{"approve": true, "summary": "Fine", "issues": []}\n```');
+    if (text.startsWith("You are the Security critic")) return said('```json\n{"summary": "Looks fine", "findings": []}\n```');
+    const reply = afterCritics(text);
+    if (reply) return reply;
+    throw new Error(`unexpected prompt: ${text.slice(0, 60)}`);
+  });
+  const triage: TriageScorer = { score: async () => ({ complexity: 0 }), securityScore: async () => 0.9 };
+  startOrchestrator(agent, 1, { triage });
+  const task = brain.createTask(brain.createSession(project.id, "Helper").id, "Tweak a helper");
+
+  expect(await untilStatus(task.id, ["awaiting_approval", "failed", "needs_human"])).toMatchObject({ status: "awaiting_approval", error: null });
+  const events = brain.listEvents(task.id);
+  expect(events.find((e) => e.type === "security_routing")?.payload).toMatchObject({ added: true, score: 0.9 });
+  expect(events.find((e) => e.type === "critics_planned")?.payload).toMatchObject({ critics: [{ critic: "security", reason: "Jev security score 0.90" }] });
+  expect(agent.prompts.some((p) => p.text.startsWith("You are the Security critic"))).toBe(true);
+});
+
+it("leaves the plan alone when Jev's security score is below the threshold", async () => {
+  const project = brain.createProject({ name: "Shop", localPath: repo });
+  const agent = new FakeAgent((text, cwd) => {
+    if (text.startsWith("You are the Planner")) return said('```json\n{"summary": "Tweak a helper"}\n```');
+    if (text.startsWith("You are the Coder")) {
+      mkdirSync(join(cwd, "src", "util"), { recursive: true });
+      writeFileSync(join(cwd, "src", "util", "format.ts"), "export const f = (x: number) => x + 1;\n");
+      return said("Added a helper.");
+    }
+    if (text.startsWith("You are the Reviewer")) return said('```json\n{"approve": true, "summary": "Fine", "issues": []}\n```');
+    const reply = afterCritics(text);
+    if (reply) return reply;
+    throw new Error(`unexpected prompt: ${text.slice(0, 60)}`);
+  });
+  const triage: TriageScorer = { score: async () => ({ complexity: 0 }), securityScore: async () => 0.2 };
+  startOrchestrator(agent, 1, { triage });
+  const task = brain.createTask(brain.createSession(project.id, "Helper").id, "Tweak a helper");
+
+  expect(await untilStatus(task.id, ["awaiting_approval", "failed", "needs_human"])).toMatchObject({ status: "awaiting_approval", error: null });
+  const events = brain.listEvents(task.id);
+  expect(events.find((e) => e.type === "security_routing")?.payload).toMatchObject({ added: false });
+  expect(events.some((e) => e.type === "critics_planned")).toBe(false);
+  expect(agent.prompts.some((p) => p.text.startsWith("You are the Security critic"))).toBe(false);
+});
+
 it("stops every task once all model calls today reach the daily budget, and starts waiting tasks when it is raised", async () => {
   brain.setAppSetting("dailyBudgetUsd", 0.05);
   const project = brain.createProject({ name: "Shop", localPath: repo });
